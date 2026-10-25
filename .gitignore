@@ -4,3 +4,9 @@ __pycache__/
 .venv/
 target/
 *.log
+
+# explainer video: intermediate audio and preview frames
+tools/explainer-video/build/
+
+# rendered videos (regenerate with tools/explainer-video)
+media/*.mp4
