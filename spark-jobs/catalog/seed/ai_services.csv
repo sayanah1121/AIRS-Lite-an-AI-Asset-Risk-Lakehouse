@@ -1,0 +1,24 @@
+asset_id,name,category,publisher,description,capability_tags,licence,popularity_hint
+service:chatgpt,ChatGPT,ai_service,openai,General-purpose AI chat assistant in the browser with file uploads and web browsing,network;file_read,proprietary,5.0
+service:claude,Claude,ai_service,anthropic,AI chat assistant in the browser with file uploads and connectors,network;file_read,proprietary,4.5
+service:gemini,Gemini,ai_service,google,AI chat assistant integrated with Google Workspace data,network;file_read,proprietary,4.5
+service:microsoft-365-copilot,Microsoft 365 Copilot,ai_service,microsoft,AI assistant that reads mail calendar and documents across Microsoft 365,network;file_read;file_write,proprietary,4.5
+service:perplexity,Perplexity,ai_service,perplexity,AI answer engine that searches the web and accepts file uploads,network;file_read,proprietary,3.5
+service:deepseek-chat,DeepSeek Chat,ai_service,deepseek,AI chat assistant hosted outside the company's usual data regions,network;file_read,proprietary,3.0
+service:grok,Grok,ai_service,xai,AI chat assistant with web search,network;file_read,proprietary,2.5
+service:le-chat,Le Chat,ai_service,mistralai,AI chat assistant with web search and document uploads,network;file_read,proprietary,2.0
+service:notion-ai,Notion AI,ai_service,notion,AI writing and Q&A over workspace pages,network;file_read;file_write,proprietary,3.0
+service:otter-ai,Otter.ai,ai_service,otter,AI meeting assistant that joins calls and records transcripts,network;file_read;autonomy,proprietary,2.5
+service:ollama,Ollama,ai_service,ollama,Local model runtime that runs open models on the laptop,code_exec;file_read,MIT,3.5
+service:lm-studio,LM Studio,ai_service,lmstudio,Desktop app for running local models,file_read,proprietary,2.5
+agent:cursor,Cursor,agent,anysphere,AI code editor whose agent reads and writes files and runs terminal commands,code_exec;file_write;file_read;network;autonomy,proprietary,4.5
+agent:github-copilot,GitHub Copilot,agent,github,AI pair programmer with an agent mode that edits files and runs commands,code_exec;file_write;file_read;network;autonomy,proprietary,5.0
+agent:claude-code,Claude Code,agent,anthropic,Terminal coding agent that edits files and runs shell commands,code_exec;file_write;file_read;network;autonomy,proprietary,4.0
+agent:codex-cli,Codex CLI,agent,openai,Terminal coding agent that edits files and runs shell commands,code_exec;file_write;file_read;network;autonomy,Apache-2.0,3.5
+agent:gemini-cli,Gemini CLI,agent,google,Terminal coding agent that edits files and runs shell commands,code_exec;file_write;file_read;network;autonomy,Apache-2.0,3.0
+agent:cline,Cline,agent,cline,Autonomous coding agent in VS Code that edits files runs commands and uses MCP servers,code_exec;file_write;file_read;network;autonomy,Apache-2.0,3.5
+agent:windsurf,Windsurf,agent,windsurf,AI code editor with an autonomous agent,code_exec;file_write;file_read;network;autonomy,proprietary,3.0
+agent:aider,Aider,agent,aider,Open-source terminal pair-programming agent that commits to git,code_exec;file_write;file_read;network;autonomy,Apache-2.0,2.5
+extension:grammarly,Grammarly,extension,grammarly,Browser extension that reads text typed into web pages to suggest edits,network;file_read,proprietary,4.0
+extension:monica,Monica,extension,monica,AI assistant browser extension that reads page content and chats with several models,network;file_read,proprietary,2.5
+extension:merlin,Merlin,extension,foyer,AI assistant browser extension that summarises pages and emails,network;file_read,proprietary,2.0
