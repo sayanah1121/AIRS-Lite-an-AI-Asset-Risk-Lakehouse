@@ -14,6 +14,8 @@
 #   ./airs.sh submit-flink [--fresh]   (re)submit airs-stream, resuming from its latest checkpoint unless --fresh
 #   ./airs.sh simulate [args]          run the fleet simulator, e.g. --rate 50 --duration 300 --scenarios rogue_mcp
 #   ./airs.sh stream-check             Phase 2 acceptance checks (dedupe, no raw PII, verdicts, latency)
+#   ./airs.sh gold                     Phase 3: run the gold_marts DAG once, now (compaction, marts, dq_gold)
+#   ./airs.sh dashboards               Phase 3: create or update the Superset dashboards (http://localhost:8089)
 set -euo pipefail
 cd "$(dirname "$0")"
 export MSYS_NO_PATHCONV=1   # stop Git Bash rewriting /opt/... container paths into Windows paths
@@ -122,5 +124,9 @@ case "${1:-help}" in
   catalog)
     compose_all exec -T airflow airflow dags reserialize >/dev/null 2>&1 || true
     compose_all exec -T airflow airflow dags test catalog_daily ;;
-  *)      sed -n '2,17p' "$0" ;;
+  gold)
+    compose_all exec -T airflow airflow dags reserialize >/dev/null 2>&1 || true
+    compose_all exec -T airflow airflow dags test gold_marts ;;
+  dashboards) compose_all exec -T superset python - < dashboards/build_dashboards.py ;;
+  *)      sed -n '2,19p' "$0" ;;
 esac

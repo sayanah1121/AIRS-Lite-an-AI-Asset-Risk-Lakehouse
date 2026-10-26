@@ -117,20 +117,23 @@ Partitioning: `days(session_start)`.
 
 **`silver.new_asset_queue`**: `asset_ref, first_seen, seen_count, devices (array), status (pending|profiled|unresolvable)`
 
-**`silver.dim_identity`** / **`silver.dim_device`**: seeded by the simulator (department, role, OS, managed flag).
+**`silver.dim_identity`** (`identity, department`) / **`silver.dim_device`** (`device_id, identity, department`): the simulated company's HR directory (300 people) and device inventory (500 laptops). Exported once by `simulator.py --export-directory` (deterministic: same seed, same company) into `spark-jobs/gold/seed/`, loaded by the `load_reference` task. Used for ROI: only people in the directory fill a seat.
 
-**`silver.dim_licence`**: simulated licence purchases (`tool, department, seats, cost_per_seat_month`), used for ROI.
+**`silver.dim_licence`**: simulated licence purchases from `spark-jobs/gold/seed/licences.csv` (`tool_id, tool_name, function, department, seats, cost_per_seat_month`), used for ROI. `function` groups tools that do the same job (`chat_assistant`, `coding_assistant`), which is how overlap is detected.
 
 ### 3.3 Gold
 
-| Table | Grain | Key metrics |
-|---|---|---|
-| `gold.shadow_ai` | asset × day | first_seen, devices, identities, `sanctioned=false`, `seen_only_on_device` (never by the network sensor), max band |
-| `gold.fleet_risk_posture` | department × day | asset count by band, mean/max AIRS, sensitive events, blocks, warns |
-| `gold.ai_roi` | tool × department × month | seats bought, active users, utilisation %, idle seats, idle cost, overlap flag |
-| `gold.compliance_evidence` | asset (current) | AIRS dimensions, reasons, framework controls (OWASP LLM, NIST AI RMF, EU AI Act) |
-| `gold.incident_timeline` | event within a session | Ordered timeline with the as-of risk context (built on demand per incident) |
-| `gold.pipeline_health` | hour | events in, late %, dedupe count, unknown-asset %, p95 verdict latency |
+Built hourly by the `gold_marts` DAG ([04 Part F](04-pipelines.md#part-f-gold-marts-phase-3-implemented)) and read live by Superset through Trino. Every table has a `built_at` column. Code: [`spark-jobs/gold/marts.py`](../spark-jobs/gold/marts.py).
+
+| Table | Grain | Partition | Key columns |
+|---|---|---|---|
+| `gold.shadow_ai` | asset × day | `day` | `asset_name, category` (`unknown` = not in the catalog), `current_band, current_airs_score, max_band_at_event, first_seen, is_new, devices, identities, departments, events, sensitive_events, blocks, warns, mb_out, files_touched, seen_only_on_device` (no network sensor saw it that day) |
+| `gold.fleet_risk_posture` | department × day | `day` | `events, active_people, active_devices, distinct_assets, assets_{critical,high,medium,low,unknown}` (each asset once, at its worst band), `mean_airs_score, max_airs_score, high_risk_events, high_risk_event_pct, unsanctioned_events, sensitive_events, blocks, warns` |
+| `gold.policy_hits` | day × policy × department × asset | `day` | `policy_name, action, hits, devices, people, first_hit, last_hit, event_types, files, sensitive_types, mb_out` |
+| `gold.ai_roi` | tool × department × month | `month` | `seats, cost_per_seat_month, active_users` (directory people only), `utilisation_pct, idle_seats, idle_cost, users_without_seat, monthly_cost, overlap, overlapping_tools` |
+| `gold.compliance_evidence` | asset (current version) | none | AIRS dimensions, `score_reasons`, `owasp_llm, nist_ai_rmf, eu_ai_act` (arrays), `evidence` (one line per triggered control and the signal behind it), `in_use_30d, devices_30d, events_30d, sensitive_events_30d, last_seen, profile_valid_from` |
+| `gold.pipeline_health` | hour | `day` | `records_in, resends_dropped, events_out, late_events, late_pct, unknown_asset_events, unknown_asset_pct, dlq_records, dlq_pct, sensitive_events, blocks, warns, latency_p50_ms, latency_p95_ms, latency_p99_ms, latency_max_ms` |
+| `gold.incident_timeline` | event within a session | – | Phase 4: ordered timeline with the as-of risk context, built on demand per incident |
 
 ## 4. Entity-relationship view
 

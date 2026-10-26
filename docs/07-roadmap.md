@@ -53,9 +53,13 @@ gantt
 
 ## Phase 3: Gold marts + dashboards (Spark + Airflow + Trino + Superset)
 **Build:** the `gold_marts` DAG and 4 Superset dashboards (Shadow AI, Risk Posture, AI ROI, Pipeline Health).
-**Done when:**
-- [ ] Dashboards update hourly from Airflow
-- [ ] The scripted scenarios (rogue MCP, finance upload) are visible on the dashboards
+**Status: ✅ done (26 Oct 2026)**
+- [x] Dashboards update hourly from Airflow: `gold_marts` runs at :15 (scheduled runs verified); 9 tasks, ~12 min, every partition overwrite idempotent; Superset reads the marts live through Trino
+- [x] The scripted scenarios are visible on the dashboards: the rogue MCP server appears under *AI the catalog has never seen* (1 device, 48 MB out, `customers.csv`); the finance upload appears as a P006 hit for finance → DeepSeek Chat with `finance_q3.xlsx`; the poisoned package (chromadb, Critical) heads the compliance evidence table
+- [x] Extra: 6 marts (`shadow_ai`, `fleet_risk_posture`, `policy_hits`, `ai_roi`, `compliance_evidence`, `pipeline_health`), 17 `dq_gold` checks, 7 new unit tests (38 pytest in total), dashboards as code (`./airs.sh dashboards`: 11 datasets, 35 charts)
+- [x] Extra: hourly compaction of the stream tables (silver 3,325 files → 144) and automatic schema evolution of the marts
+
+**Measured (simulated fleet, 26 Oct):** 226 shadow AI assets in a day, **91% of them never seen by a network sensor** (endpoint-only); 7 assets unknown to the catalog; 227 assets in use, 42 of them High/Critical; licences $12,010/month with $5,277 idle (54% utilisation) and 5 engineers using Cursor without a seat. The Pipeline Health dashboard shows the 06:00 UTC recovery hour (p95 ≈ 20 min while Flink replayed the backlog after the storage crash) against p95 ≈ 200 ms in normal hours.
 
 ## Phase 4: Sessions + investigation (Flink + Spark + Iceberg time travel)
 **Build:** session windows, the late-event side output and backfill, `investigate.py`, and an Investigation dashboard.

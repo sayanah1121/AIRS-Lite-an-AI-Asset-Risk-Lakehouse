@@ -106,8 +106,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    # 400m was OOM-killed under Flink checkpoints + Iceberg commits + Spark at the same time
-    mem_limit: 1g
+    # 400m was OOM-killed under Flink checkpoints + Iceberg commits + Spark; 1g sat at ~90% with the stream job running
+    mem_limit: 1536m
     restart: unless-stopped
 
   # One-shot: create the buckets Iceberg and Flink checkpoints need.
@@ -300,6 +300,7 @@ services:
       - ./schemas:/opt/airs/schemas:ro
       - ./infra/spark/spark-defaults.conf:/opt/spark-conf/spark-defaults.conf:ro
       - ./infra/spark/log4j2.properties:/opt/spark-conf/log4j2.properties:ro
+      - ./policies:/opt/airs/policies:ro          # rule names for gold.policy_hits
       - airflow-logs:/opt/airflow/logs
     depends_on:
       postgres:

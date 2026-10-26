@@ -216,14 +216,36 @@ flowchart LR
 
 Run it once now: `./airs.sh catalog`.
 
-### D.2 Planned DAGs (later phases)
+### D.2 `gold_marts` (implemented)
+
+```mermaid
+flowchart LR
+    compact[compact_stream_tables] --> marts
+    ref[load_reference] --> marts
+    subgraph marts[6 marts, one at a time]
+        shadow[shadow_ai]
+        posture[fleet_risk_posture]
+        hits[policy_hits]
+        roi[ai_roi]
+        comp[compliance_evidence]
+        health[pipeline_health]
+    end
+    marts --> dq[dq_gold]
+```
+
+- Schedule `15 * * * *` (hourly at :15), `max_active_runs=1`, `max_active_tasks=1` (one Spark app at a time: see F.5), each Spark app capped at 1 core. Run timeout 50 min.
+- Retries: 2 with a 1-minute delay (none for `dq_gold`). Each task is a `SparkSubmitOperator` running `spark-jobs/gold/*.py` with `common.py` and `marts.py` as `--py-files`.
+- Details and measurements: [Part F](#part-f-gold-marts-phase-3-implemented).
+
+Run it once now: `./airs.sh gold`.
+
+### D.3 Planned DAGs (later phases)
 
 | DAG | Schedule | Tasks | Failure handling |
 |---|---|---|---|
 | `new_asset_profiling` | hourly | read queue → profile → score → publish | Unresolvable after 3 tries → `status=unresolvable`, band stays `High` |
-| `gold_marts` | hourly at :15 | `build_gold_shadow_ai`, `…_risk_posture`, `…_ai_roi`, `…_compliance`, `…_pipeline_health` → DQ | Idempotent partition overwrite |
 | `late_event_backfill` | hourly at :45 | `backfill_late_events` | – |
-| `iceberg_maintenance` | 03:30 daily | compact → rewrite manifests → expire snapshots → remove orphans | Runs after `catalog_daily` |
+| `iceberg_maintenance` | 03:30 daily | expire snapshots → remove orphans → full compaction (hourly compaction of recent partitions already runs in `gold_marts`) | Runs after `catalog_daily` |
 | `audit_verify` | 04:00 daily | `verify_audit_chain` | Failure = **critical alert** |
 | `flink_job_health` | every 15 min | Flink REST: job RUNNING? checkpoint < 2 min old? Redpanda lag OK? | Alert; optional resubmit from the latest checkpoint |
 
@@ -242,3 +264,55 @@ Run it once now: `./airs.sh catalog`.
 | Score range | `dim_asset_risk` | all scores between 0 and 10, band consistent with score |
 
 Implemented as Spark assertions inside Airflow tasks (Great Expectations or Soda optional).
+
+---
+
+## Part F: Gold marts (Phase 3, implemented)
+
+Code: [`spark-jobs/gold/`](../spark-jobs/gold/) (marts are pure DataFrame functions in `marts.py`, unit-tested in `tests/gold/`), DAG [`airflow/dags/gold_marts.py`](../airflow/dags/gold_marts.py), dashboards as code in [`dashboards/build_dashboards.py`](../dashboards/build_dashboards.py). Table columns: [03 §3.3](03-data-model.md#33-gold).
+
+### F.1 Jobs
+
+| Script / task | Reads | Writes | What it does |
+|---|---|---|---|
+| `compact_stream_tables.py` | `silver.fct_ai_events`, `bronze.ai_events` | same tables | `rewrite_data_files` on the last 2 days: merges the ~13 KB files Flink's 20 s commits leave behind (one afternoon: **3,325 files → 144**; an hour of traffic: 272 → 16). Safe next to Flink: rewrites files, not rows, and commits optimistically |
+| `build_gold.py --mart reference` | `seed/*.csv` | `silver.dim_licence`, `dim_identity`, `dim_device` | Atomic `createOrReplace` of the reference tables |
+| `build_gold.py --mart <mart>` | silver + reference | `gold.<mart>` | Rebuilds whole UTC days (`--days 2`: today and yesterday; months for `ai_roi`) and **overwrites only those partitions** (`overwritePartitions`), so reruns are idempotent and late events land in the next run. A column added to a mart is added to the table first (`ALTER TABLE … ADD COLUMN`, Iceberg schema evolution) |
+| `dq_gold.py` | gold + silver | `ops.dq_results` (suite `gold`) | 17 checks (F.3); a fatal failure fails the task |
+
+### F.2 What each mart answers
+
+| Mart | Question | Notes |
+|---|---|---|
+| `shadow_ai` | Which AI is in use that nobody approved, and could a network-only tool even see it? | Unsanctioned **or unknown** assets; `seen_only_on_device` = no network-sensor event that day; `mb_out` and `files_touched` make exfiltration stand out (the rogue MCP: 48 MB, `customers.csv`) |
+| `fleet_risk_posture` | How risky is the AI each department actually uses? | Each asset counted once at its worst band of the day, so averages are per asset, not per event |
+| `policy_hits` | What did the policies block or warn on, and why? | Policy names come from `policies/*.yaml`, the same rules Flink enforces |
+| `ai_roi` | Are we paying for seats nobody uses, or for two tools that do the same job? | Active users are counted against the HR directory only; `users_without_seat` shows demand beyond what was bought |
+| `compliance_evidence` | Which framework controls apply to each asset, and on what evidence? | Crosswalk in [05 §6](05-risk-scoring.md#6-framework-crosswalk-for-goldcompliance_evidence); all 22,063 current assets, flagged `in_use_30d` |
+| `pipeline_health` | Is the real-time path healthy, hour by hour? | Hours with no traffic get a row with 0 events, so an outage is visible rather than skipped |
+
+### F.3 Gold data-quality checks (`dq_gold.py`)
+Fatal: posture reconciles with silver (for each day, the mart's event count lies between the silver rows processed 2 min before the build and those processed by the build: Flink commits every 20 s, so this is exact without a race) · unique keys in all six marts · ROI seat arithmetic (`idle + active − without_seat = seats`) · compliance covers every current asset · every High/Critical asset in use has at least one mapped control · every shadow-AI row is backed by an unsanctioned or unknown event · no raw PII in silver for the window.
+Warning (SLOs from [06 §6](06-setup-and-operations.md#6-monitoring)): worst hourly p95 latency < 1 s · late < 5% · unknown assets < 2% · DLQ < 0.1% · stream processed an event within 15 min.
+
+### F.4 Dashboards (Superset, built by `./airs.sh dashboards`)
+
+The Trino connection, 11 datasets (4 physical tables + 7 SQL views for "latest day/month" and unnesting arrays), 35 charts and 4 dashboards are created through the Superset REST API and matched by name, so rerunning updates them in place. Superset queries Trino live (no cache), so each hourly DAG run is visible on the next refresh (dashboards auto-refresh every 10 min).
+
+| Dashboard | URL | Shows |
+|---|---|---|
+| Shadow AI | http://localhost:8089/superset/dashboard/shadow-ai/ | KPIs (shadow assets, new today, % seen only on the endpoint, unknown to the catalog), by category × band, visibility, AI the catalog has never seen, most widespread shadow AI |
+| Fleet Risk Posture | http://localhost:8089/superset/dashboard/risk-posture/ | High-risk share, blocks, warns, sensitive events; assets by band per department; verdicts per department; policy hits by rule and the newest hits; mean/max AIRS; in-use assets per OWASP LLM risk; compliance evidence table |
+| AI ROI | http://localhost:8089/superset/dashboard/ai-roi/ | Spend, idle seat cost, utilisation, overlaps; utilisation by tool × department; idle cost by tool; licences vs usage |
+| Pipeline Health | http://localhost:8089/superset/dashboard/pipeline-health/ | Latency p95, throughput, late %, unknown % (with trend lines); latency percentiles (log scale); throughput; lateness/unknown/DLQ; latest `dq_gold` results |
+
+### F.5 What broke on the way (and the fix)
+
+| Problem | Cause | Fix |
+|---|---|---|
+| Each mart took ~4 min for a few hundred rows | Flink's 20 s commits had left 3,325 files of ~13 KB in silver; every job opened all of them | `compact_stream_tables` as the DAG's first task |
+| `ValidationException: Deleted manifest … could not be found` | `rewrite_manifests` raced Flink, whose merge-append also rewrites manifests on every commit | Dropped: Flink's merge-append already bounds the manifest count |
+| `INSERT_COLUMN_ARITY_MISMATCH` on `shadow_ai` | Two columns were added to the mart after the table existed | Automatic `ADD COLUMN` before writing (schema evolution) |
+| Two marts in parallel took ~5.5 min each, one alone ~1.5 min | The 8 GB Docker VM ran out of RAM and swap (memory "full" stall ~40%) with two Spark drivers + executors next to the always-on stack | `max_active_tasks=1` |
+| `list >> list` dependency error | Airflow can't set dependencies between two lists | `cross_downstream([compact, reference], marts)` |
+| Each simulator run invented a new company (unseeded names: 1,770 "people" for 500 laptops) | Faker was not seeded | Seeded people + an exported HR directory; ROI counts directory people only |

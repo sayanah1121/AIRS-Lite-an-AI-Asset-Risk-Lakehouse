@@ -40,7 +40,7 @@ The **same Iceberg version (1.12.0)** is used by Spark and Flink. The REST catal
 |---|---|---|---|
 | `redpanda` | core | 19092 (Kafka), 18081 (Schema Registry), 9644 (admin) | Event bus |
 | `redpanda-console` | core | 8080 | Topic, schema and consumer-lag UI |
-| `seaweedfs` | core | 8333 (S3 API), 8888 (filer UI) | Object storage: buckets `warehouse`, `checkpoints` |
+| `seaweedfs` | core | 8333 (S3 API), 8888 (filer UI) | Object storage: buckets `warehouse`, `checkpoints` (1.5 GB limit) |
 | `s3-init` | core | – | One-shot job that creates the buckets |
 | `catalog-db-init` | core | – | One-shot job that creates the Iceberg catalog's Postgres database and role |
 | `iceberg-rest` | core | 8181 | Iceberg REST catalog (catalog name `airs`), pointers in Postgres |
@@ -50,9 +50,9 @@ The **same Iceberg version (1.12.0)** is used by Spark and Flink. The REST catal
 | `spark-worker` | batch | 8083 (UI) | 2 cores, 1 GB |
 | `postgres` | core, batch | – | Iceberg catalog + Airflow metadata |
 | `simulator` | stream | – | Fleet simulator, run on demand with `./airs.sh simulate` |
-| `airflow` | batch | 8088 | Airflow 3 UI + API (no login in local dev) |
+| `airflow` | batch | 8088 | Airflow 3 UI + API (no login in local dev); DAGs `catalog_daily`, `gold_marts` |
 | `trino` | bi | 8085 | SQL engine (catalog `airs`) |
-| `superset` | bi | 8089 | Dashboards (user `admin`, password in `.env`) |
+| `superset` | bi | 8089 | 4 dashboards built by `./airs.sh dashboards` (user `admin`, password in `.env`) |
 
 Memory limits are set on every container. With Docker Desktop's default WSL2 share (about 8 GB on a 16 GB machine) the whole stack runs (about 4.2 GB used when idle). Later phases run streaming and batch jobs at the same time, so 10 GB+ is more comfortable (see section 9).
 
@@ -71,14 +71,16 @@ airs-lite/
 ├── flink-jobs/               # smoke/ now; airs-stream job (Java/Maven)        (Phase 2)
 ├── spark-jobs/
 │   ├── smoke/                # Phase 0 smoke test
-│   └── catalog/              # Phase 1: ingest_*, resolve_entities, score_assets, publish, dq
-│       └── seed/             # curated AI services/agents, allow-list, trusted publishers, seed packages
-├── airflow/dags/             # hello_spark_iceberg, catalog_daily
+│   ├── catalog/              # Phase 1: ingest_*, resolve_entities, score_assets, publish, dq
+│   │   └── seed/             # curated AI services/agents, allow-list, trusted publishers, seed packages
+│   └── gold/                 # Phase 3: marts.py, build_gold, compact_stream_tables, dq_gold
+│       └── seed/             # simulated licences, HR directory (people), device inventory
+├── airflow/dags/             # hello_spark_iceberg, catalog_daily, gold_marts
 ├── schemas/                  # Avro schemas (asset_risk_update.avsc)
 ├── policies/                 # *.yaml policy rules                             (Phase 2)
 ├── sql/                      # DDL, investigation queries
-├── dashboards/               # Superset exports                                (Phase 3)
-├── tests/catalog/            # pytest unit tests for normalisation and scoring
+├── dashboards/               # build_dashboards.py: Superset dashboards as code   (Phase 3)
+├── tests/                    # pytest: catalog/ (normalisation, scoring), gold/ (marts)
 └── docs/
 ```
 
@@ -164,7 +166,24 @@ Runs the acceptance checks (`sql/checks/stream_checks.sql`): dedupe, raw-PII sca
 ```
 Re-publishes `policies/*.yaml`; Flink applies the change within seconds.
 
-### 5.4 Commands planned for later phases
+### 5.4 Phase 3: gold marts and dashboards
+
+```bash
+./airs.sh gold
+```
+Runs the `gold_marts` DAG once, now: compacts the stream tables, loads the reference seeds, builds the six marts and runs `dq_gold`. It takes about 12 minutes (one Spark app at a time, ~1–1.5 min each, mostly Spark start-up). To keep the marts current, unpause `gold_marts` in the Airflow UI (it runs hourly at :15); pause it again to free the CPU.
+
+```bash
+./airs.sh dashboards
+```
+Creates or updates the Trino connection, datasets, charts and the four dashboards in Superset (safe to rerun). Then open http://localhost:8089/superset/dashboard/shadow-ai/ (also `risk-posture`, `ai-roi`, `pipeline-health`).
+
+To regenerate the simulated company directory (only if you change `--people`/`--devices`):
+```bash
+MSYS_NO_PATHCONV=1 docker compose --profile stream run --rm -v "$PWD/spark-jobs/gold/seed:/out" simulator python simulator.py --export-directory /out
+```
+
+### 5.5 Commands planned for later phases
 `./airs.sh demo-crash` · `./airs.sh demo-tamper`
 
 Then open Superset (http://localhost:8089), the Flink UI (http://localhost:8081), the Airflow UI (http://localhost:8088) and Redpanda Console (http://localhost:8080).
@@ -184,10 +203,10 @@ Then open Superset (http://localhost:8089), the Flink UI (http://localhost:8081)
 
 | Level | What | Tools |
 |---|---|---|
-| Unit | Redaction detectors (true and false positives), Luhn, scoring rules, entity-resolution normalisation | JUnit (Flink), pytest (Spark/Python) |
+| Unit | Redaction detectors (true and false positives), Luhn, scoring rules, entity-resolution normalisation, every gold mart | JUnit (Flink, 13 tests), pytest (Spark, 38 tests: `./airs.sh test`) |
 | Operator | Dedupe, watermarks, broadcast enrichment, session windows | Flink test harness (`KeyedOneInputStreamOperatorTestHarness`) |
 | Integration | Simulator → Redpanda → Flink → Iceberg row counts | Testcontainers or the compose stack in CI |
-| Data quality | The checks in [04 – Pipelines, Part E](04-pipelines.md#part-e-data-quality-checks) | Airflow tasks |
+| Data quality | The checks in [04 – Pipelines, Part E](04-pipelines.md#part-e-data-quality-checks) and `dq_gold` ([Part F.3](04-pipelines.md#f3-gold-data-quality-checks-dq_goldpy)) | Airflow tasks |
 | Chaos demos | TaskManager kill, offline-device burst, schema evolution, audit tampering | `airs.sh` commands |
 
 CI (GitHub Actions): lint, run unit tests, build the Flink JAR, run Spark job tests with local mode and the Iceberg Hadoop catalog.
@@ -200,7 +219,9 @@ CI (GitHub Actions): lint, run unit tests, build the Flink JAR, run Spark job te
 | `ClassNotFoundException` for Iceberg/S3 | Missing runtime or AWS bundle JARs | Add `iceberg-flink-runtime-1.20` + `iceberg-aws-bundle` to `/opt/flink/lib` |
 | Spark and Flink see different tables | Different catalog configs | Point both at `http://iceberg-rest:8181`, same warehouse |
 | Watermark doesn't advance | Idle Redpanda partitions | `withIdleness(Duration.ofMinutes(1))` |
-| Thousands of tiny Parquet files | Frequent checkpoints | Run the `iceberg_maintenance` DAG; raise the checkpoint interval |
+| Thousands of tiny Parquet files; marts take minutes for a few rows | Flink commits every 20 s per partition | `compact_stream_tables` (first task of `gold_marts`) |
+| `ValidationException: Deleted manifest … could not be found` | `rewrite_manifests` racing Flink's commits | Don't rewrite manifests on tables Flink is writing |
+| Spark task fails with exit code -9, or `BlockManager re-registration` | OOM killer: the Docker VM ran out of RAM and swap | Run one Spark app at a time (`gold_marts` does); stop Superset/Trino while running batch; or give WSL more memory (section 9) |
 | Docker becomes very slow | Not enough RAM | Start only the profiles you need; 1 Spark worker with 2 GB |
 | GitHub API 403 | Rate limit | Use a token; cache responses; incremental ingestion |
 | `pip install pyspark` times out during `docker build` | Slow connection; the wheel is about 300 MB | The Dockerfiles already use `--default-timeout=600 --retries 10`; just re-run the build |
@@ -209,7 +230,7 @@ CI (GitHub Actions): lint, run unit tests, build the Flink JAR, run Spark job te
 | `ClassCastException: Integer cannot be cast to Short` in py4j | py4j turns a Java `Short` into a Python int | Avoid passing Java `Short` through Python (replication factor left to the broker) |
 | Catalog jobs slow on tiny tables | 200 default shuffle partitions | `spark.sql.shuffle.partitions 8` in `spark-defaults.conf` |
 | Iceberg commits fail with HTTP 500, catalog log shows `SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT` | SQLite catalog can't take concurrent commits | The catalog is on Postgres now; don't switch back to the SQLite fixture default |
-| Catalog requests hang; log shows `UnknownHostException: seaweedfs` | SeaweedFS stopped (it was OOM-killed at 400 MB) | `docker compose ps seaweedfs`; it now has 1 GB and `restart: unless-stopped` |
+| Catalog requests hang; log shows `UnknownHostException: seaweedfs` | SeaweedFS stopped (it was OOM-killed at 400 MB) | `docker compose ps seaweedfs`; it now has 1.5 GB and `restart: unless-stopped` |
 | Flink job fails with `NoSuchMethodError` in Jackson | Mixed Jackson versions in the job jar | Keep the `jackson-bom` import in `pom.xml` |
 | Flink SQL: `Encountered "identity"` | Reserved word | Quote with backticks |
 | Flink job disappeared after `docker compose up` recreated the JobManager | No JobManager HA | `./airs.sh submit-flink` resumes from the newest retained checkpoint |

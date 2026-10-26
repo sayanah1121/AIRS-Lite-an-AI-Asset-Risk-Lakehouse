@@ -10,7 +10,9 @@ catalog has never seen, and prompts that contain fake personal data, test card n
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import os
 import random
 import string
 import threading
@@ -101,11 +103,18 @@ class Fleet:
     def __init__(self, n_devices: int, n_people: int, pool: dict[str, list[dict]], seed: int = 7):
         self.rng = random.Random(seed)
         self.pool = pool
-        self.people = []
-        for _ in range(n_people):
+        # A seeded Faker of its own, so the same company (same names, same people) comes back on every run.
+        names = Faker()
+        names.seed_instance(seed)
+        self.people, taken = [], set()
+        for i in range(n_people):
             dept = self.rng.choices(list(DEPARTMENTS), [v[0] for v in DEPARTMENTS.values()])[0]
-            first, last = fake.first_name().lower(), fake.last_name().lower()
-            self.people.append({"identity": f"{first}.{last}@corp.example", "department": dept})
+            first, last = names.first_name().lower(), names.last_name().lower()
+            identity = f"{first}.{last}@corp.example"
+            if identity in taken:                        # two people with the same name get distinct addresses
+                identity = f"{first}.{last}{i}@corp.example"
+            taken.add(identity)
+            self.people.append({"identity": identity, "department": dept})
         self.devices = []
         for i in range(n_devices):
             person = self.people[i % n_people]
@@ -225,6 +234,25 @@ def watch_verdicts(stats: Counter, stop: threading.Event) -> None:
     c.close()
 
 
+# ───────────────────────────── company directory ─────────────────────────────
+
+def export_directory(fleet: Fleet, out_dir: str) -> None:
+    """The HR directory and device inventory a real company would export nightly (gold uses it for licence ROI).
+
+    People and device owners depend only on the seed, not on the catalog, so this matches every simulator run.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "people.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["identity", "department"])
+        w.writerows((p["identity"], p["department"]) for p in fleet.people)
+    with open(os.path.join(out_dir, "devices.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["device_id", "identity", "department"])
+        w.writerows((d["device_id"], d["identity"], d["department"]) for d in fleet.devices)
+    print(f"wrote {len(fleet.people)} people and {len(fleet.devices)} devices to {out_dir}", flush=True)
+
+
 # ───────────────────────────── main loop ─────────────────────────────
 
 def main() -> None:
@@ -239,7 +267,13 @@ def main() -> None:
     ap.add_argument("--unknown-rate", type=float, default=0.02)
     ap.add_argument("--scenarios", default="", help="comma list: rogue_mcp,finance_upload,secret_paste,poisoned_package")
     ap.add_argument("--scenario-after", type=float, default=30, help="seconds before scenarios start")
+    ap.add_argument("--export-directory", metavar="DIR",
+                    help="write the company directory (people.csv, devices.csv) to DIR and exit")
     args = ap.parse_args()
+
+    if args.export_directory:
+        export_directory(Fleet(args.devices, args.people, {}), args.export_directory)
+        return
 
     ensure_topics(["ai-events-raw", "verdicts"])
     schema_id, schema = register_schema("ai-events-raw-value", "ai_event.avsc")

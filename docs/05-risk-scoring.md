@@ -134,12 +134,16 @@ Rules are evaluated in `priority` order, the first match wins, and the default i
 
 ## 6. Framework crosswalk (for `gold.compliance_evidence`)
 
-| Signal | OWASP LLM Top 10 (2025) | NIST AI RMF | EU AI Act theme |
+Each score reason an asset carries is mapped to framework controls (code: `CROSSWALK` in [`spark-jobs/gold/marts.py`](../spark-jobs/gold/marts.py)). Fleet telemetry adds one more: sensitive data seen in the asset's events in the last 30 days.
+
+| Signal (score reason or telemetry) | OWASP LLM Top 10 (2025) | NIST AI RMF | EU AI Act theme |
 |---|---|---|---|
-| Code/shell execution, autonomy | LLM06 Excessive Agency | MANAGE | Human oversight |
-| Sensitive data in prompts | LLM02 Sensitive Information Disclosure | MEASURE | Data governance |
-| Vulnerable / poisoned package | LLM03 Supply Chain | MAP | Robustness & cybersecurity |
-| Unknown publisher / no licence | LLM03 Supply Chain | GOVERN | Transparency |
-| Prompt injection exposure (external content tools) | LLM01 Prompt Injection | MEASURE | Robustness & cybersecurity |
+| can execute code or shell commands · can write or delete data · acts autonomously | LLM06 Excessive Agency | MANAGE | Human oversight |
+| handles credentials or payments · hosted remotely by a third party | LLM02 Sensitive Information Disclosure | MEASURE / MAP | Data governance |
+| sensitive data in the asset's events (last 30 days) | LLM02 Sensitive Information Disclosure | MEASURE | Data governance |
+| has outbound network access (reads external content) | LLM01 Prompt Injection | MEASURE | Robustness & cybersecurity |
+| known-malicious version · open advisory on the version in use | LLM03 Supply Chain | MAP | Robustness & cybersecurity |
+| unverified publisher · no/unclear or restrictive licence · archived or stale | LLM03 Supply Chain | GOVERN | Transparency |
+| not on the company allow-list | – | GOVERN | Human oversight |
 
 > The mappings are a documented, best-effort learning aid, not legal advice.
