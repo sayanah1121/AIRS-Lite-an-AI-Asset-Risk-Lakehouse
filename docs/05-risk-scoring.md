@@ -104,40 +104,33 @@ Examples:
 
 Policies are YAML files in `policies/`, published to the compacted `policy-updates` topic and held in Flink broadcast state. Edits take effect within seconds, with no redeploy.
 
+The rule set in [`policies/default.yaml`](../policies/default.yaml):
+
+| ID | Rule | Action |
+|---|---|---|
+| P001 | Payment-card data sent to an unsanctioned asset | block |
+| P002 | Any use of a Critical-band asset | block |
+| P003 | Secrets sent to an unsanctioned asset | block |
+| P004 | Any sensitive data (PCI, PII, SECRET, GOV_ID) sent to AI | warn |
+| P005 | MCP tool call that touches data (`read_file`, `query`, `execute`, …) on a High/Critical asset | warn |
+| P006 | Spreadsheet (`xlsx`, `xls`, `csv`) uploaded to an unsanctioned asset | warn |
+| P007 | Asset not found in the risk catalog | warn |
+
 ```yaml
 - policy_id: P001
   name: Block payment data to unsanctioned AI
   priority: 10
   when:
     sensitive_types_any: [PCI]
-    asset.sanctioned: false
+    asset_sanctioned: false
   action: block
-
-- policy_id: P002
-  name: Block critical-risk assets
-  priority: 20
-  when:
-    asset.band: Critical
-  action: block
-
-- policy_id: P003
-  name: Warn on secrets pasted into any AI
-  priority: 30
-  when:
-    sensitive_types_any: [SECRET]
-  action: warn
-
-- policy_id: P004
-  name: Warn on high-risk MCP tool calls touching files
-  priority: 40
-  when:
-    event_type: mcp_tool_call
-    asset.band_in: [High, Critical]
-    tool_name_in: [read_file, write_file, query]
-  action: warn
 ```
 
-Rules are evaluated in `priority` order, the first match wins, and the default is `allow`. Each verdict records the `policy_id` that fired.
+Conditions: `sensitive_types_any`, `asset_sanctioned`, `asset_band_in`, `asset_known`, `event_type_in`, `tool_name_in`, `file_ext_in`. All the conditions that are set must hold. Unit tests: `flink-jobs/airs-stream/src/test/java/ai/airs/stream/PolicyRuleTest.java`.
+
+Rules are evaluated in `priority` order, the first match wins, and the default is `allow`. Each verdict records the `policy_id` that fired. Publish edits with `./airs.sh policies`; removed rules are deleted with a tombstone.
+
+**Observed on simulated traffic** (17,329 events): allow 15,717 · P005 619 · P006 453 · P004 244 · P007 137 · P003 89 · P001 49 · P002 21.
 
 ## 6. Framework crosswalk (for `gold.compliance_evidence`)
 

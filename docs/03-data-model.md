@@ -6,11 +6,11 @@
 |---|---|---|---|---|---|
 | `ai-events-raw` | `device_id` | `AiEvent` (Avro) | 6 | delete, 7d | Simulator → Flink |
 | `asset-risk-updates` | `asset_id` | `AssetRiskUpdate` | 3 | **compact** | Spark → Flink (broadcast) |
-| `policy-updates` | `policy_id` | `PolicyRule` | 1 | **compact** | CLI/Airflow → Flink (broadcast) |
-| `verdicts` | `device_id` | `Verdict` | 6 | delete, 7d | Flink → simulator / SIEM export |
+| `policy-updates` | `policy_id` | `PolicyRule` (JSON) | 1 | **compact** | `./airs.sh policies` → Flink (broadcast) |
+| `verdicts` | – | `Verdict` (JSON, transactional) | 6 | delete, 7d | Flink → simulator / SIEM export |
 | `late-events` | `device_id` | `AiEvent` + `lateness_ms` | 3 | delete, 7d | Flink side output → Spark backfill |
-| `new-assets` | `asset_ref` | `UnknownAsset` | 1 | delete, 7d | Flink → Airflow profiling DAG |
-| `ai-events-dlq` | – | raw bytes + error | 1 | delete, 14d | Flink → manual inspection |
+| `new-assets` | – | `UnknownAsset` (JSON) | 1 | delete, 7d | Flink → Airflow profiling DAG (Phase 5) |
+| `ai-events-dlq` | – | JSON: error + base64 raw bytes | 1 | delete, 14d | Flink → manual inspection |
 
 Compacted topics keep the **latest value per key**. When Flink starts, it reads the whole topic and rebuilds the complete catalog in broadcast state.
 
@@ -41,11 +41,13 @@ Compacted topics keep the **latest value per key**. When Flink starts, it reads 
 ### 2.2 `AssetRiskUpdate` (implemented: [`schemas/asset_risk_update.avsc`](../schemas/asset_risk_update.avsc))
 `asset_id, asset_name, category, airs_score, capability, exposure, governance, band, sanctioned (bool), aliases (array<string>), valid_from, reason`
 
-### 2.3 `PolicyRule`
-`policy_id, name, enabled, priority, condition (JSON DSL), action (allow|warn|block), updated_at`. See [05 – Risk Scoring](05-risk-scoring.md#5-policy-engine).
+### 2.3 `PolicyRule` (JSON)
+`policy_id, name, priority, enabled, action (allow|warn|block), when {sensitive_types_any, asset_sanctioned, asset_band_in, asset_known, event_type_in, tool_name_in, file_ext_in}`: the YAML from `policies/*.yaml` as JSON. See [05 – Risk Scoring](05-risk-scoring.md#5-policy-engine).
 
-### 2.4 `Verdict`
-`event_id, ts_event, device_id, identity, asset_id, airs_score, band, sensitive_types (array), policy_id, action, latency_ms`
+### 2.4 `Verdict` (JSON)
+`event_id, ts_event, device_id, identity, event_type, asset_id, asset_known, airs_score, band, sanctioned, catalog_valid_from, sensitive_types, policy_id, action, latency_ms`
+
+Avro is used for the high-volume event stream and the risk catalog, where Schema Registry contracts matter. The low-volume control and output topics use JSON for simplicity.
 
 ## 3. Iceberg tables
 
@@ -101,8 +103,8 @@ Partitioning: `category`. Sort order: `asset_id, valid_from`.
 
 **`silver.fct_ai_events`**: written by Flink
 
-All `AiEvent` fields (prompt redacted), plus `asset_id`, `asset_sk_at_event`, `airs_score_at_event`, `band_at_event`, `sanctioned_at_event`, `sensitive_types` (array), `sensitive_count`, `policy_id`, `action`, `session_id`, `is_late` (bool), `ingested_at`.
-Partitioning: `days(ts_event)`, `bucket(16, device_id)`.
+One row per distinct `event_id` (DDL: [`sql/ddl/stream_tables.sql`](../sql/ddl/stream_tables.sql)): the `AiEvent` fields (prompt **redacted**), plus `asset_id`, `asset_known`, `asset_category`, `airs_score_at_event`, `band_at_event`, `sanctioned_at_event`, **`catalog_valid_from`** (which SCD2 version of the risk profile was used, so it links to `dim_asset_risk` for audits), `sensitive_types`, `sensitive_count`, `policy_id`, `action`, `latency_ms`, `processed_at`.
+Partitioning: `day(ts_event)`, `bucket(device_id, 16)`. Session and lateness columns arrive in Phase 4.
 
 **`silver.fct_sessions`**: written by Flink (session windows)
 

@@ -42,12 +42,14 @@ gantt
 
 ## Phase 2: Streaming pipeline (Redpanda + Flink + Iceberg)
 **Build:** the simulator, Avro schemas, and the Flink job (redact → dedupe → enrich with broadcast state → policy → sinks). Spark publishes scores to `asset-risk-updates`.
-**Done when:**
-- [ ] Events flow into `silver.fct_ai_events` with scores and verdicts
-- [ ] 0 raw PII found by the no-PII check
-- [ ] Duplicates are removed (count verified)
-- [ ] Changing a score in the catalog changes verdicts within seconds, without restarting Flink
-- [ ] p95 verdict latency is measured and recorded
+**Status: ✅ done (26 Oct 2026)**
+- [x] Events flow into `silver.fct_ai_events` with scores and verdicts: 98.4% resolved against 22,063 catalog assets
+- [x] 0 raw PII found by the no-PII check (secrets, cards, emails, phones, PAN/Aadhaar), in bronze and silver
+- [x] Duplicates are removed: 0 duplicate event_ids in silver
+- [x] Changing a score changes verdicts without restarting Flink: **3.7 s** from the update landing in Redpanda to the first verdict on the new profile, and 0 verdicts on the old profile after it landed
+- [x] p95 verdict latency measured: **p50 130 ms · p95 229 ms · p99 710 ms** (device send → verdict, 50 events/s)
+- [x] Extra: **exactly-once under real failure.** After ~20 failed catalog commits, a catalog migration, a storage OOM crash and a resume from checkpoint, bronze held exactly the 57,313 records in the topic and silver exactly the 56,803 distinct events
+- [x] Extra: 13 JUnit tests (redaction, policies), 4 attack scenarios verified (poisoned package, card/secret leaks, finance upload, rogue MCP)
 
 ## Phase 3: Gold marts + dashboards (Spark + Airflow + Trino + Superset)
 **Build:** the `gold_marts` DAG and 4 Superset dashboards (Shadow AI, Risk Posture, AI ROI, Pipeline Health).

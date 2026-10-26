@@ -8,11 +8,17 @@
 #   ./airs.sh smoke                    Phase 0 smoke test (Spark + Flink + Airflow + Trino on one Iceberg table)
 #   ./airs.sh test                     unit tests (pytest inside the Spark container)
 #   ./airs.sh catalog                  run the catalog_daily DAG once, now (Phase 1 risk catalog)
+#   ./airs.sh init                     Phase 2: create topics, register schemas, create stream tables, publish policies
+#   ./airs.sh policies                 publish policies/*.yaml to Flink (applies within seconds)
+#   ./airs.sh build-flink              build + unit-test the Flink job jar (Maven in Docker)
+#   ./airs.sh submit-flink [--fresh]   (re)submit airs-stream, resuming from its latest checkpoint unless --fresh
+#   ./airs.sh simulate [args]          run the fleet simulator, e.g. --rate 50 --duration 300 --scenarios rogue_mcp
+#   ./airs.sh stream-check             Phase 2 acceptance checks (dedupe, no raw PII, verdicts, latency)
 set -euo pipefail
 cd "$(dirname "$0")"
 export MSYS_NO_PATHCONV=1   # stop Git Bash rewriting /opt/... container paths into Windows paths
 
-ALL_PROFILES=(core batch bi)
+ALL_PROFILES=(core batch bi stream)
 compose_all() { docker compose $(printf -- '--profile %s ' "${ALL_PROFILES[@]}") "$@"; }
 
 [[ -f .env ]] || { echo "Missing .env: copy .env.example to .env and set the secrets."; exit 1; }
@@ -25,6 +31,11 @@ wait_http() {  # name url [tries]
     sleep 3; printf '.'
   done
   echo " NOT RESPONDING ($url)"; return 1
+}
+
+# Newest completed checkpoint (one with a _metadata file) of any airs-stream run, as s3://... path.
+latest_checkpoint() {
+  docker run --rm --network airs_default -e AWS_ACCESS_KEY_ID="$(grep ^S3_ACCESS_KEY .env | cut -d= -f2)"     -e AWS_SECRET_ACCESS_KEY="$(grep ^S3_SECRET_KEY .env | cut -d= -f2)" -e AWS_DEFAULT_REGION=us-east-1     amazon/aws-cli:2.38.4 --endpoint-url http://seaweedfs:8333 s3 ls --recursive s3://checkpoints/flink/ 2>/dev/null     | grep '/chk-[0-9]*/_metadata$' | sort -k1,2 | tail -1 | awk '{print $4}' | sed 's|/_metadata$||; s|^|s3://checkpoints/|'
 }
 
 running() { compose_all ps --status running --services 2>/dev/null | grep -qx "$1"; }
@@ -88,9 +99,28 @@ case "${1:-help}" in
   logs)   shift; compose_all logs -f --tail=200 "$@" ;;
   wait)   cmd_wait ;;
   smoke)  cmd_smoke ;;
+  init)
+    compose_all run --rm simulator python init_topics.py
+    compose_all exec -T trino trino -f /dev/stdin < sql/ddl/stream_tables.sql
+    compose_all run --rm simulator python publish_policies.py ;;
+  policies) compose_all run --rm simulator python publish_policies.py ;;
+  build-flink)
+    docker run --rm -v "$PWD/flink-jobs/airs-stream:/src" -v airs_maven-cache:/root/.m2 -w /src       maven:3.9.13-eclipse-temurin-17 mvn -q -B package ;;
+  submit-flink)
+    for id in $(compose_all exec -T flink-jobmanager flink list -r 2>/dev/null | grep -oE '[0-9a-f]{32} : airs-stream' | cut -d' ' -f1); do
+      echo "cancelling running airs-stream job $id"; compose_all exec -T flink-jobmanager flink cancel "$id" >/dev/null
+    done
+    resume=()
+    if [[ "${2:-}" != "--fresh" ]]; then
+      cp=$(latest_checkpoint)
+      [[ -n "$cp" ]] && { echo "resuming from $cp"; resume=(-s "$cp"); }
+    fi
+    compose_all exec -T flink-jobmanager flink run -d "${resume[@]}" /opt/airs/flink-jobs/airs-stream/target/airs-stream.jar ;;
+  simulate) shift; compose_all run --rm simulator python simulator.py "$@" ;;
+  stream-check) compose_all exec -T trino trino --output-format=ALIGNED -f /dev/stdin < sql/checks/stream_checks.sql ;;
   test)   compose_all exec -T -w /opt/airs spark-master python -m pytest -q -p no:cacheprovider tests ;;
   catalog)
     compose_all exec -T airflow airflow dags reserialize >/dev/null 2>&1 || true
     compose_all exec -T airflow airflow dags test catalog_daily ;;
-  *)      sed -n '2,11p' "$0" ;;
+  *)      sed -n '2,17p' "$0" ;;
 esac

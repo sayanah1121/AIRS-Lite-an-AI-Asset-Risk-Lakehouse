@@ -20,13 +20,15 @@ The **same Iceberg version (1.12.0)** is used by Spark and Flink. The REST catal
 |---|---|---|
 | Apache Flink | 1.20.3 (Java 17) | `airs/flink` = `flink:1.20.3-scala_2.12-java17` + `iceberg-flink-runtime-1.20`, `iceberg-aws-bundle`, `hadoop-client-api/runtime 3.3.6`, `flink-sql-connector-kafka 3.4.0-1.20`, S3 plugin |
 | Apache Spark | 3.5.8 (Scala 2.12, Python 3.11) | `airs/spark` = Python 3.11 + Temurin 17 + `pyspark==3.5.8` + `iceberg-spark-runtime-3.5_2.12`, `iceberg-aws-bundle` |
-| Apache Iceberg | 1.12.0 | REST catalog: `apache/iceberg-rest-fixture:1.10.1` (SQLite-backed, persisted in a volume) |
+| Apache Iceberg | 1.12.0 | REST catalog: `airs/iceberg-rest` = `apache/iceberg-rest-fixture:1.10.1` + PostgreSQL JDBC 42.7.12 (pointers in Postgres) |
 | Apache Airflow | 3.3.2 (Python 3.11) | `airs/airflow` = `apache/airflow:3.3.2-python3.11` + Java 17 + `pyspark` + `apache-airflow-providers-apache-spark` |
 | Redpanda | v25.3.18 | `redpandadata/redpanda`, Console `redpandadata/console:v3.12.0` |
 | SeaweedFS | 4.47 | `chrislusf/seaweedfs`: S3-compatible object storage |
 | Trino | 483 | `trinodb/trino`, Iceberg connector against the REST catalog |
 | Superset | 6.1.0 | `airs/superset` = `apache/superset:6.1.0` + `trino` driver |
-| PostgreSQL | 16.15 | Airflow metadata DB |
+| PostgreSQL | 16.15 | Airflow metadata + Iceberg catalog (`iceberg_catalog` database) |
+| Flink job | Java 17, Maven 3.9.13 (in Docker) | Kafka connector 3.4.0-1.20, Avro 1.11.5, Jackson 2.17.3 bundled in the job jar |
+| Simulator | Python 3.11 | confluent-kafka 2.16, fastavro 1.13, Faker, PyYAML |
 
 > **Why SeaweedFS instead of MinIO?** MinIO's public Docker Hub images were withdrawn, so a fresh `docker pull minio/minio` no longer works. SeaweedFS is actively maintained, implements the S3 API and works with Iceberg's `S3FileIO` (path-style access).
 >
@@ -40,12 +42,14 @@ The **same Iceberg version (1.12.0)** is used by Spark and Flink. The REST catal
 | `redpanda-console` | core | 8080 | Topic, schema and consumer-lag UI |
 | `seaweedfs` | core | 8333 (S3 API), 8888 (filer UI) | Object storage: buckets `warehouse`, `checkpoints` |
 | `s3-init` | core | – | One-shot job that creates the buckets |
-| `iceberg-rest` | core | 8181 | Iceberg REST catalog (catalog name `airs`) |
+| `catalog-db-init` | core | – | One-shot job that creates the Iceberg catalog's Postgres database and role |
+| `iceberg-rest` | core | 8181 | Iceberg REST catalog (catalog name `airs`), pointers in Postgres |
 | `flink-jobmanager` | core | 8081 | Flink UI / REST |
-| `flink-taskmanager` | core | – | 1 instance, 4 slots, RocksDB state, checkpoints to `s3://checkpoints/flink` |
+| `flink-taskmanager` | core | – | 1 instance, 4 slots, 1.5 GB, RocksDB state, checkpoints to `s3://checkpoints/flink` (retained on cancel) |
 | `spark-master` | batch | 7077, 8082 (UI) | Spark standalone master |
 | `spark-worker` | batch | 8083 (UI) | 2 cores, 1 GB |
-| `postgres` | batch | – | Airflow metadata |
+| `postgres` | core, batch | – | Iceberg catalog + Airflow metadata |
+| `simulator` | stream | – | Fleet simulator, run on demand with `./airs.sh simulate` |
 | `airflow` | batch | 8088 | Airflow 3 UI + API (no login in local dev) |
 | `trino` | bi | 8085 | SQL engine (catalog `airs`) |
 | `superset` | bi | 8089 | Dashboards (user `admin`, password in `.env`) |
@@ -128,8 +132,40 @@ Look at the result in Trino (http://localhost:8085 or `docker compose --profile 
 SELECT band, count(*) FROM airs.silver.dim_asset_risk WHERE is_current GROUP BY 1;
 ```
 
-### 5.3 Commands planned for later phases
-`./airs.sh init` (topics, schemas) · `seed` · `submit-flink` · `simulate` · `demo-crash` · `demo-tamper`
+### 5.3 Phase 2: the real-time pipeline
+
+```bash
+./airs.sh init
+```
+Creates all Redpanda topics, registers the event schema, creates `bronze.ai_events` and `silver.fct_ai_events` (Trino DDL in `sql/ddl/`), and publishes the policies.
+
+```bash
+./airs.sh build-flink
+```
+Compiles and unit-tests the Java job in a Maven container (dependencies are cached in the `airs_maven-cache` volume).
+
+```bash
+./airs.sh submit-flink
+```
+Submits `airs-stream`, cancelling a running copy first and **resuming from the newest checkpoint**. Use `--fresh` to start from scratch.
+
+```bash
+./airs.sh simulate --rate 50 --duration 300 --scenarios rogue_mcp,finance_upload,secret_paste,poisoned_package
+```
+Runs the fleet simulator; it prints live verdict counts and every block.
+
+```bash
+./airs.sh stream-check
+```
+Runs the acceptance checks (`sql/checks/stream_checks.sql`): dedupe, raw-PII scan, verdicts by policy, resolution rate, latency percentiles, late data, recent blocks.
+
+```bash
+./airs.sh policies
+```
+Re-publishes `policies/*.yaml`; Flink applies the change within seconds.
+
+### 5.4 Commands planned for later phases
+`./airs.sh demo-crash` · `./airs.sh demo-tamper`
 
 Then open Superset (http://localhost:8089), the Flink UI (http://localhost:8081), the Airflow UI (http://localhost:8088) and Redpanda Console (http://localhost:8080).
 
@@ -172,6 +208,11 @@ CI (GitHub Actions): lint, run unit tests, build the Flink JAR, run Spark job te
 | `Invalid call to dataType on unresolved object` | `F.nullif` bug in PySpark 3.5 | Use `F.when(col != value, col)` (see `resolve_entities.nullif`) |
 | `ClassCastException: Integer cannot be cast to Short` in py4j | py4j turns a Java `Short` into a Python int | Avoid passing Java `Short` through Python (replication factor left to the broker) |
 | Catalog jobs slow on tiny tables | 200 default shuffle partitions | `spark.sql.shuffle.partitions 8` in `spark-defaults.conf` |
+| Iceberg commits fail with HTTP 500, catalog log shows `SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT` | SQLite catalog can't take concurrent commits | The catalog is on Postgres now; don't switch back to the SQLite fixture default |
+| Catalog requests hang; log shows `UnknownHostException: seaweedfs` | SeaweedFS stopped (it was OOM-killed at 400 MB) | `docker compose ps seaweedfs`; it now has 1 GB and `restart: unless-stopped` |
+| Flink job fails with `NoSuchMethodError` in Jackson | Mixed Jackson versions in the job jar | Keep the `jackson-bom` import in `pom.xml` |
+| Flink SQL: `Encountered "identity"` | Reserved word | Quote with backticks |
+| Flink job disappeared after `docker compose up` recreated the JobManager | No JobManager HA | `./airs.sh submit-flink` resumes from the newest retained checkpoint |
 | `docker pull minio/minio` fails | MinIO's Docker Hub images were withdrawn | Use SeaweedFS (already configured) |
 | `/opt/...` paths become `C:/Program Files/Git/opt/...` | Git Bash path conversion | `export MSYS_NO_PATHCONV=1` before `docker compose exec` (as `airs.sh` does) |
 

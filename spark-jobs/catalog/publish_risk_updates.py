@@ -26,9 +26,12 @@ def ensure_compacted_topic(spark, bootstrap: str, partitions: int = 3) -> None:
     jvm = spark._jvm
     props = jvm.java.util.Properties()
     props.put("bootstrap.servers", bootstrap)
+    props.put("request.timeout.ms", "15000")
+    props.put("default.api.timeout.ms", "30000")
+    seconds = jvm.java.util.concurrent.TimeUnit.SECONDS
     admin = jvm.org.apache.kafka.clients.admin.AdminClient.create(props)
     try:
-        if admin.listTopics().names().get().contains(TOPIC):
+        if admin.listTopics().names().get(45, seconds).contains(TOPIC):
             return
         configs = jvm.java.util.HashMap()
         configs.put("cleanup.policy", "compact")
@@ -36,7 +39,7 @@ def ensure_compacted_topic(spark, bootstrap: str, partitions: int = 3) -> None:
             # Replication factor left to the broker default: py4j turns a java Short into a Python int.
             TOPIC, jvm.java.util.Optional.of(jvm.java.lang.Integer.valueOf(partitions)),
             jvm.java.util.Optional.empty()).configs(configs)
-        admin.createTopics(jvm.java.util.Collections.singletonList(topic)).all().get()
+        admin.createTopics(jvm.java.util.Collections.singletonList(topic)).all().get(45, seconds)
         log(f"created compacted topic {TOPIC}")
     finally:
         admin.close()

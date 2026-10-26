@@ -109,7 +109,7 @@ flowchart LR
 | Processing | **Apache Flink** | Stateful real-time processing: redaction, dedupe, enrichment, policy, sessionization, exactly-once sinks |
 | Processing | **Apache Spark** | Batch ingestion, entity resolution, scoring, SCD2 merges, gold marts, investigations, table maintenance |
 | Storage | **Apache Iceberg on SeaweedFS (S3)** | ACID tables shared by Flink and Spark, with time travel, schema evolution and hidden partitioning |
-| Storage | **Iceberg REST catalog** | The single catalog both engines use, so table metadata stays consistent |
+| Storage | **Iceberg REST catalog** (pointers in PostgreSQL) | The single catalog Spark, Flink and Trino use, so table metadata stays consistent. Postgres, not SQLite, because Flink's two committers commit concurrently |
 | Serving | **Trino + Superset** | Interactive SQL and dashboards on Iceberg |
 | Orchestration | **Apache Airflow** | Schedules and monitors all batch work, maintenance and health checks |
 
@@ -204,7 +204,7 @@ Even bronze events are **redacted**. Raw prompt text is never written to disk (s
 |---|---|
 | Duplicate events | Flink keyed `ValueState` on `event_id` with a 48h TTL |
 | Late events | Event-time watermarks (5 min out-of-orderness), allowed lateness of 24h for windows, later events go to the `late-events` side output |
-| Crash recovery | Flink checkpoints every 30s (RocksDB state backend). Redpanda offsets and the Iceberg commit are part of each checkpoint, which gives exactly-once. |
+| Crash recovery | Flink checkpoints every 20 s (RocksDB, incremental), retained on cancel; `submit-flink` resumes from the newest one. Redpanda offsets and the Iceberg commit are part of each checkpoint, which gives exactly-once (verified through crashes: topic records = bronze rows). Long-running containers use `restart: unless-stopped`. |
 | Concurrent writes | Iceberg optimistic concurrency. Flink and Spark write *different* tables, except `dim_asset_risk`, which only Spark writes. |
 | Small files from streaming | Nightly `rewrite_data_files` compaction, plus `expire_snapshots` and `remove_orphan_files` |
 | Schema changes | Avro backward-compatible evolution; Iceberg column adds without rewriting data |

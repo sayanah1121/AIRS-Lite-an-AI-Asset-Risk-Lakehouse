@@ -4,83 +4,101 @@ This doc covers every job in the platform: what it reads, what it does, what it 
 
 ---
 
-## Part A: Fleet simulator (Python)
+## Part A: Fleet simulator (Python, implemented)
 
-**Purpose:** create realistic AI activity for a fake company.
+Code: `simulator/` (image `airs/simulator`, compose profile `stream`). Run it with `./airs.sh simulate [args]`.
 
-| Setting | Default |
+**Realistic by construction.** At start-up the simulator reads the live risk catalog from the compacted `asset-risk-updates` topic and "installs" a realistic subset on every laptop: all curated AI services, agents and extensions, all seed packages, 40 models, and 120 MCP servers (30 of them High-risk), chosen by department. Every event therefore refers to a real asset. 40% of references use an alias (package key, lower-case name, repo slug) instead of the canonical id, as a real sensor would report it.
+
+| Setting (flag) | Default |
 |---|---|
-| Devices / identities | 500 / 300 |
-| Departments | engineering, finance, sales, hr, support, legal |
-| Event rate | 50–500 events/s (configurable) |
-| Offline devices | 5% go offline for 1–24 h, then flush their buffered events |
-| Duplicate rate | 1% resent with the same `event_id` |
-| Clock skew | ±2 min on 3% of devices |
-| Unknown assets | 2% of events reference assets that aren't in the catalog |
-| Sensitive data | 4% of prompts/pastes contain fake PII, Luhn-valid test card numbers or fake API keys |
+| Devices / people (`--devices`, `--people`) | 500 / 300, across engineering, finance, sales, hr, support, legal |
+| Rate (`--rate`) | 50 events/s |
+| Offline (`--offline-rate`) | a device can go offline for 1–10 min (scaled-down hours) and then flushes its buffered events with their original `ts_event` |
+| Duplicates (`--duplicate-rate`) | 1%: the same event is resent with the same `event_id` |
+| Clock skew | ±2 min on about 3% of devices |
+| Unknown assets (`--unknown-rate`) | 2% of events reference MCP servers that aren't in the catalog |
+| Sensitive data (`--sensitive-rate`) | 4% of prompts and 8% of pastes contain fake emails, phone numbers, Luhn-valid test card numbers, AWS/OpenAI-style keys, or PAN/Aadhaar numbers |
 
-**Scripted attack scenarios** (toggled with flags):
-1. **Rogue MCP:** an engineer installs `mcp:unknown-7f`, which calls `read_file` on `customers.csv` and then sends data to an unknown host.
-2. **Finance upload:** an analyst uploads `finance_q3.xlsx` to an unsanctioned chatbot.
-3. **Poisoned package:** devices update to an AI package version that has an OSV advisory.
-4. **Secret paste:** a developer pastes a code block containing an API key into a browser AI app.
+**Scenarios** (`--scenarios`, injected after `--scenario-after` seconds):
 
-Output: Avro to `ai-events-raw`, keyed by `device_id`. It also consumes `verdicts` and logs what "would have been blocked."
+| Scenario | What happens | Verdict observed |
+|---|---|---|
+| `poisoned_package` | 3 engineering laptops install `pypi:chromadb` (open critical advisory) | **block** (P002, Critical) |
+| `secret_paste` | A developer pastes an AWS key into Claude Code (unsanctioned) | **block** (P003) |
+| `finance_upload` | An analyst uploads `finance_q3.xlsx` to DeepSeek Chat (unsanctioned) | **warn** (P006) |
+| `rogue_mcp` | An unknown MCP server appears, reads `customers.csv`, sends 48 MB to an unknown host | **warn** (P007) + reported on `new-assets` |
+
+Output: Confluent-framed Avro on `ai-events-raw` (schema `schemas/ai_event.avsc`, registered as `ai-events-raw-value`), key = `device_id`. A background consumer prints Flink's live verdict counts and every block.
+
+Helpers in the same image: `init_topics.py` (all topics + schema, run by `./airs.sh init`) and `publish_policies.py` (`policies/*.yaml` → compacted `policy-updates`, with tombstones for removed rules).
 
 ---
 
-## Part B: Flink streaming job `airs-stream`
+## Part B: Flink streaming job `airs-stream` (Java, implemented)
+
+Code: `flink-jobs/airs-stream/` (Maven; `./airs.sh build-flink` builds and unit-tests it inside a Maven container, `./airs.sh submit-flink` submits it and resumes from the latest checkpoint).
 
 ### B.1 Operator graph
 
 ```mermaid
 flowchart LR
-    SRC[Kafka source<br/>ai-events-raw] --> DESER[Avro deserialize<br/>→ DLQ on error]
-    DESER --> RED[Redact<br/>PII/PCI/secrets]
-    RED --> WM[Assign timestamps<br/>+ watermarks]
-    WM --> KEY1[keyBy event_id]
-    KEY1 --> DEDUP[Dedupe<br/>ValueState + TTL 48h]
-    DEDUP --> KEY2[keyBy device_id]
-    CAT[Kafka source<br/>asset-risk-updates] --> BC((broadcast))
-    POL[Kafka source<br/>policy-updates] --> BC
-    KEY2 --> ENR[KeyedBroadcastProcessFunction<br/>enrich + policy verdict]
+    SRC[Kafka source<br/>ai-events-raw<br/>Avro via Schema Registry] --> SPLIT{decode ok?}
+    SPLIT -- no --> DLQ[ai-events-dlq]
+    SPLIT -- yes --> RED[Redact<br/>SECRET · PCI · GOV_ID · PII]
+    RED --> BRZ[(Iceberg<br/>bronze.ai_events)]
+    RED --> DED[Dedupe<br/>keyBy event_id<br/>ValueState + TTL 48h]
+    CTL[Kafka source<br/>asset-risk-updates + policy-updates<br/>replayed from earliest] --> BC((broadcast))
+    DED --> ENR[EnrichAndDecide<br/>keyBy device_id]
     BC --> ENR
-    ENR --> SINK1[Iceberg sink<br/>bronze.ai_events / silver.fct_ai_events]
-    ENR --> SINK2[Kafka sink<br/>verdicts]
-    ENR --> AUD[Audit chain<br/>keyed by partition]
-    AUD --> SINK3[Iceberg sink<br/>silver.audit_log]
-    ENR -.unknown asset.-> SINK4[Kafka sink<br/>new-assets]
-    ENR --> KEY3[keyBy identity+device]
-    KEY3 --> SESS[Event-time session window<br/>gap 30 min]
-    SESS --> SINK5[Iceberg sink<br/>silver.fct_sessions]
-    SESS -.too late.-> LATE[Side output<br/>late-events]
+    ENR --> SLV[(Iceberg<br/>silver.fct_ai_events)]
+    ENR --> VER[verdicts<br/>JSON, exactly-once]
+    ENR -.unknown asset.-> NEW[new-assets]
 ```
 
-### B.2 Steps in detail
+### B.2 Steps
 
-| # | Operator | Logic | State |
-|---|---|---|---|
-| 1 | **Deserialize** | Avro via Schema Registry; on failure write to `ai-events-dlq` | – |
-| 2 | **Redact** | Regex detectors + Luhn check (cards) + entropy check (secrets). Replace matches with `[REDACTED:<TYPE>]`, emit `sensitive_types`, `sensitive_count` | Stateless |
-| 3 | **Watermarks** | `forBoundedOutOfOrderness(5 min)` on `ts_event`, with idleness of 1 min so quiet partitions don't stall | – |
-| 4 | **Dedupe** | First `event_id` passes; repeats are dropped and counted in a metric | `ValueState<Boolean>`, TTL 48h |
-| 5 | **Enrich** | Normalise `asset_ref` → look up `asset_id` via an alias map in broadcast state → attach score, band and sanctioned flag. If not found: provisional `High`, emit to `new-assets` | Broadcast `MapState<alias, AssetRisk>` |
-| 6 | **Policy** | Evaluate enabled rules in priority order; the first match wins; the default is `allow`. Record `latency_ms = now − ingest_ts` | Broadcast `MapState<policy_id, Rule>` |
-| 7 | **Audit chain** | For `warn`/`block`: `record_hash = SHA256(prev_hash ‖ json)`; `prev_hash` is kept per audit partition | `ValueState<String>` |
-| 8 | **Sessionize** | `EventTimeSessionWindows.withGap(30 min)`, `allowedLateness(24 h)`, `sideOutputLateData` | Window state |
-| 9 | **Sinks** | Iceberg `FlinkSink` (upsert off, append), committed on checkpoint; Kafka sinks with `EXACTLY_ONCE` delivery | – |
+| Step | Logic |
+|---|---|
+| **Decode** | Confluent wire format: the writer schema is fetched from the Schema Registry by id and cached, so producers can evolve the schema without redeploying. Bad records go to `ai-events-dlq` (with the error and raw bytes); the deserializer never throws. |
+| **Watermarks** | Bounded out-of-orderness of 5 min on `ts_event`, idleness 1 min. The control stream emits the maximum watermark so it never holds back event time after the broadcast join. |
+| **Redact** | `Redactor`: ordered regex detectors (secrets, then Luhn-checked card numbers, then PAN/Aadhaar, then emails and phones). Matches become `[REDACTED:<TYPE>]`; only the categories and the count are kept. Runs **before** the first sink. |
+| **Bronze sink** | Every redacted copy, duplicates included, so dedupe can be audited. |
+| **Dedupe** | Keyed by `event_id`; the first copy passes and resends are dropped (`events_deduped` metric). |
+| **Enrich & decide** | Broadcast state holds every asset's current profile, an **alias index** (any reference → `asset_id`) and the policies. Tombstones remove retired assets. Events resolve their `asset_ref`; unknown assets get a provisional High profile and are reported once per device. Policies are evaluated in priority order; the first match wins, default allow. `latency_ms = verdict time − ts_sent`. |
+| **Warm-up** | After a fresh start the catalog (about 22k assets) is replayed from the compacted topic. Events arriving before it has loaded are **parked** in keyed state and released by a timer, so they aren't misjudged as "unknown". |
+| **Sinks** | Iceberg bronze and silver through the Table API on the same job graph (committed on every checkpoint, exactly-once); `verdicts` through a transactional Kafka sink (exactly-once); `new-assets` and DLQ at-least-once. |
 
 ### B.3 Runtime configuration
+
 | Setting | Value |
 |---|---|
-| Checkpoint interval | 30 s, exactly-once, at most 1 concurrent |
-| State backend | RocksDB, incremental checkpoints to `s3://checkpoints/` |
-| Restart strategy | Fixed delay: 5 attempts, 10 s |
-| Parallelism | 2 (laptop) |
-| Language | Java 17 (recommended) or PyFlink 1.20 |
+| Checkpoints | Every 20 s, exactly-once, RocksDB incremental, `s3://checkpoints/flink`, **retained on cancel** |
+| Restart | Flink default for checkpointed jobs (exponential delay) |
+| Parallelism | 2 (laptop); TaskManager 1.5 GB process memory, 4 slots |
+| Packaging | The Kafka connector, Avro and Jackson are bundled in the job jar; Flink runtime, Table API and Iceberg come from the cluster |
 
-### B.4 Metrics exported
-`events_in`, `events_deduped`, `events_late`, `events_dlq`, `unknown_asset_ratio`, `verdict_latency_p95`, `blocks`, `warns`, plus checkpoint duration and size (Flink UI / REST API).
+### B.4 Measured results (26 Oct 2026, 50 events/s, laptop)
+
+| What | Result |
+|---|---|
+| Latency, device send → verdict | **p50 130 ms · p95 229 ms · p99 710 ms** · max 1.6 s |
+| Catalog change → verdicts change, no restart | **3.7 s** from the update landing in Redpanda to the first verdict on the new profile (includes waiting for the next event about that asset); 0 old-profile verdicts afterwards |
+| Dedupe | 0 duplicate `event_id`s in silver |
+| Privacy | 0 raw secrets, cards, emails, phones or government IDs in bronze or silver |
+| Enrichment | 98.4% of events resolved; the 1.6% unknown matches the planned unknown rate |
+| Exactly-once under failure | Topic: 57,313 records → bronze: 57,313 rows; silver: 56,803 = distinct events, 0 duplicates. This survived ~20 failed catalog commits, a catalog migration, a storage OOM crash and a resume from checkpoint |
+
+### B.5 What broke on the way (and the fix)
+
+| Problem | Cause | Fix |
+|---|---|---|
+| Job failed: `NoSuchMethodError` in Jackson | Avro pulled an older `jackson-core` than `jackson-databind` needs (Maven nearest-wins) | Import `jackson-bom` in `dependencyManagement` |
+| `SQL parse failed. Encountered "identity"` | `identity` is a reserved word in Flink SQL | Quote it with backticks |
+| Iceberg commits failed with HTTP 500 | The REST catalog stored pointers in **SQLite**; the bronze and silver committers commit at the same moment on every checkpoint (`SQLITE_BUSY`, then `SQLITE_BUSY_SNAPSHOT` with WAL) | Catalog moved to **PostgreSQL** (custom `airs/iceberg-rest` image with the JDBC driver); existing table pointers migrated row by row; the SQLite file kept as a backup |
+| Catalog requests hung; Spark publish hung | **SeaweedFS was OOM-killed** (400 MB) under checkpoints + commits + a Spark job at once | SeaweedFS 1 GB; `restart: unless-stopped` on all long-running services; Kafka AdminClient timeouts in the publisher |
+| Job lost when the JobManager container was recreated | No HA; checkpoints are only kept on failure | `RETAIN_ON_CANCELLATION` and `./airs.sh submit-flink` resumes from the newest checkpoint that has `_metadata` |
+| Shaded `flink-sql-connector-kafka` in the cluster | It relocates Kafka classes, so DataStream code can't read record keys (needed for tombstones) | Removed from the image; the connector is bundled in the job jar |
 
 ---
 

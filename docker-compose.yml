@@ -3,6 +3,7 @@
 #   core  = redpanda, redpanda-console, seaweedfs (S3), iceberg-rest, flink
 #   batch = spark, postgres, airflow
 #   bi    = trino, superset
+#   stream = simulator (fleet of laptops producing AI events)
 # Start everything:  ./airs.sh up            (or: docker compose --profile core --profile batch --profile bi up -d)
 
 x-s3-env: &s3-env
@@ -21,12 +22,14 @@ x-catalog-env: &catalog-env
 x-flink-properties: &flink-properties |
   jobmanager.rpc.address: flink-jobmanager
   jobmanager.memory.process.size: 768m
-  taskmanager.memory.process.size: 1024m
+  taskmanager.memory.process.size: 1536m
   taskmanager.numberOfTaskSlots: 4
   parallelism.default: 2
   state.backend.type: rocksdb
   state.backend.incremental: true
   state.checkpoints.dir: s3://checkpoints/flink
+  # keep checkpoints when a job is cancelled, so ./airs.sh submit-flink can resume from the latest one
+  execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
   s3.endpoint: http://seaweedfs:8333
   s3.path.style.access: true
   s3.access-key: ${S3_ACCESS_KEY}
@@ -61,6 +64,7 @@ services:
       timeout: 5s
       retries: 12
     mem_limit: 900m
+    restart: unless-stopped
 
   redpanda-console:
     image: redpandadata/console:v3.12.0
@@ -75,6 +79,7 @@ services:
       redpanda:
         condition: service_healthy
     mem_limit: 200m
+    restart: unless-stopped
 
   seaweedfs:
     image: chrislusf/seaweedfs:4.47
@@ -101,7 +106,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    mem_limit: 400m
+    # 400m was OOM-killed under Flink checkpoints + Iceberg commits + Spark at the same time
+    mem_limit: 1g
+    restart: unless-stopped
 
   # One-shot: create the buckets Iceberg and Flink checkpoints need.
   s3-init:
@@ -123,28 +130,49 @@ services:
         condition: service_healthy
     restart: "no"
 
-  iceberg-rest:
-    image: apache/iceberg-rest-fixture:1.10.1
+  # One-shot: the Iceberg catalog's own database and role in Postgres (idempotent).
+  catalog-db-init:
+    image: postgres:16.15-alpine
     profiles: [core]
-    user: root
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      ICEBERG_DB_PASSWORD: ${ICEBERG_DB_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        psql -h postgres -U airflow -d airflow -v ON_ERROR_STOP=1 -v pw="$$ICEBERG_DB_PASSWORD" <<'SQL'
+        SELECT 'CREATE ROLE iceberg LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'iceberg') \gexec
+        ALTER ROLE iceberg WITH LOGIN PASSWORD :'pw';
+        SELECT 'CREATE DATABASE iceberg_catalog OWNER iceberg' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'iceberg_catalog') \gexec
+        SQL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  iceberg-rest:
+    build: ./infra/iceberg-rest
+    image: airs/iceberg-rest:1.10.1
+    profiles: [core]
     environment:
       <<: *s3-env
       CATALOG_WAREHOUSE: s3://warehouse/
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
       CATALOG_S3_ENDPOINT: http://seaweedfs:8333
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
-      # Persist catalog metadata (table pointers) across restarts.
-      CATALOG_URI: jdbc:sqlite:file:/catalog/iceberg_catalog.db
-      CATALOG_JDBC_USER: user
-      CATALOG_JDBC_PASSWORD: password
+      # Table pointers live in Postgres: safe for concurrent commits from Flink, Spark and Trino.
+      CATALOG_URI: jdbc:postgresql://postgres:5432/iceberg_catalog
+      CATALOG_JDBC_USER: iceberg
+      CATALOG_JDBC_PASSWORD: ${ICEBERG_DB_PASSWORD}
     ports:
       - "8181:8181"
-    volumes:
-      - iceberg-catalog:/catalog
     depends_on:
       s3-init:
         condition: service_completed_successfully
+      catalog-db-init:
+        condition: service_completed_successfully
     mem_limit: 400m
+    restart: unless-stopped
 
   flink-jobmanager:
     build: ./infra/flink
@@ -162,6 +190,7 @@ services:
     depends_on:
       - iceberg-rest
     mem_limit: 900m
+    restart: unless-stopped
 
   flink-taskmanager:
     image: airs/flink:1.20.3
@@ -174,7 +203,22 @@ services:
       - ./flink-jobs:/opt/airs/flink-jobs
     depends_on:
       - flink-jobmanager
-    mem_limit: 1200m
+    mem_limit: 1800m
+    restart: unless-stopped
+
+  # ───────────────────────────── stream ─────────────────────────────
+  simulator:
+    build: ./simulator
+    image: airs/simulator:0.1
+    profiles: [stream]
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      SCHEMA_REGISTRY_URL: http://redpanda:8081
+    volumes:
+      - ./simulator:/opt/airs/simulator
+      - ./schemas:/opt/airs/schemas:ro
+      - ./policies:/opt/airs/policies:ro
+    mem_limit: 512m
 
   # ───────────────────────────── batch ─────────────────────────────
   spark-master:
@@ -195,6 +239,7 @@ services:
       - ./infra/spark/spark-defaults.conf:/opt/spark-conf/spark-defaults.conf:ro
       - ./infra/spark/log4j2.properties:/opt/spark-conf/log4j2.properties:ro
     mem_limit: 900m
+    restart: unless-stopped
 
   spark-worker:
     image: airs/spark:3.5.8
@@ -213,10 +258,11 @@ services:
     depends_on:
       - spark-master
     mem_limit: 1800m
+    restart: unless-stopped
 
   postgres:
     image: postgres:16.15-alpine
-    profiles: [batch]
+    profiles: [core, batch]   # core: Iceberg catalog database; batch: Airflow metadata
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -229,6 +275,7 @@ services:
       timeout: 5s
       retries: 20
     mem_limit: 256m
+    restart: unless-stopped
 
   airflow:
     build: ./infra/airflow
@@ -258,6 +305,7 @@ services:
       postgres:
         condition: service_healthy
     mem_limit: 3g
+    restart: unless-stopped
 
   # ───────────────────────────── bi ─────────────────────────────
   trino:
@@ -271,6 +319,7 @@ services:
       - ./infra/trino/catalog:/etc/trino/catalog:ro
       - ./infra/trino/jvm.config:/etc/trino/jvm.config:ro
     mem_limit: 1400m
+    restart: unless-stopped
 
   superset:
     build: ./infra/superset
@@ -286,11 +335,12 @@ services:
       - ./infra/superset/airs-init.sh:/app/docker/airs-init.sh:ro
       - superset-home:/app/superset_home
     mem_limit: 1g
+    restart: unless-stopped
 
 volumes:
   redpanda-data:
   seaweedfs-data:
-  iceberg-catalog:
+  iceberg-catalog:          # old SQLite catalog, kept as a backup after the move to Postgres
   postgres-data:
   airflow-logs:
   superset-home:

@@ -144,8 +144,9 @@ flowchart LR
 |---|---|
 | 0 · Environment | ✅ Done: 13-service Docker stack; smoke test passes (Spark + Flink + Airflow write one Iceberg table, Trino/Superset read it) |
 | 1 · Risk catalog | ✅ Done: 22,063 real AI assets (HF, MCP Registry, PyPI/npm, GitHub, OSV) resolved, scored, versioned (SCD2) and published to Redpanda by the `catalog_daily` DAG |
-| 2 · Streaming pipeline | ⏭️ Next |
-| 3–5 | Planned. See the [roadmap](docs/07-roadmap.md) |
+| 2 · Streaming pipeline | ✅ Done: 500 simulated laptops → Redpanda → Flink (redact, dedupe, enrich from the live catalog, allow/warn/block) → Iceberg. p95 latency 229 ms; catalog updates apply in seconds without a restart; exactly-once verified through crashes |
+| 3 · Dashboards | ⏭️ Next |
+| 4–5 | Planned. See the [roadmap](docs/07-roadmap.md) |
 
 ### Quick start
 ```bash
@@ -159,5 +160,14 @@ cp .env.example .env
 ```
 ```bash
 ./airs.sh catalog
+```
+```bash
+./airs.sh init && ./airs.sh build-flink && ./airs.sh submit-flink
+```
+```bash
+./airs.sh simulate --rate 50 --duration 300 --scenarios rogue_mcp,finance_upload,secret_paste,poisoned_package
+```
+```bash
+./airs.sh stream-check
 ```
 UIs: Airflow http://localhost:8088 · Flink http://localhost:8081 · Spark http://localhost:8082 · Redpanda Console http://localhost:8080 · Trino http://localhost:8085 · Superset http://localhost:8089 · SeaweedFS filer http://localhost:8888
