@@ -15,9 +15,9 @@ with DAG(
     SparkSubmitOperator(
         task_id="append_from_airflow",
         conn_id="spark_default",
-        application="/opt/airs/spark-jobs/smoke/smoke_spark.py",
+        application="/opt/tracewell/spark-jobs/smoke/smoke_spark.py",
         application_args=["append", "airflow"],
-        name="airs-smoke-airflow",
+        name="tracewell-smoke-airflow",
         conf={
             # Driver runs inside the Airflow container; executors call back to it.
             "spark.driver.host": "airflow",

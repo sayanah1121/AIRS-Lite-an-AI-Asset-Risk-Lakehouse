@@ -24,7 +24,7 @@ def main() -> None:
     start = datetime.now(timezone.utc).date() - timedelta(days=args.days - 1)
     for table, ts_col in TABLES.items():
         where = "" if args.full else f", where => \"{ts_col} >= TIMESTAMP '{start} 00:00:00'\""
-        r = spark.sql(f"""CALL airs.system.rewrite_data_files(table => '{table}'{where},
+        r = spark.sql(f"""CALL tracewell.system.rewrite_data_files(table => '{table}'{where},
                           options => map('min-input-files', '2', 'partial-progress.enabled', 'true'))""").first()
         log(f"{table}: {r.rewritten_data_files_count} files -> {r.added_data_files_count} "
             f"({r.rewritten_bytes_count / 1e6:.1f} MB)")

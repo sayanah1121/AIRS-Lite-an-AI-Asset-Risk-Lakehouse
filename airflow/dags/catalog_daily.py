@@ -1,13 +1,11 @@
 """catalog_daily: build the AI asset risk catalog every night.
 
-  init_tables
-      ├─ ingest_hf ──────────────┐
-      └─ ingest_mcp_registry ─ ingest_packages ─┬─ ingest_github ─┐
-                                                └─ ingest_osv ────┴─ resolve_entities ─ score_assets ─ publish_risk_updates ─ dq_catalog
+  init_tables ─ ingest_packages ─ ingest_osv ─ resolve_entities ─ score_assets ─ publish_risk_updates ─ dq_catalog
 
-Package, GitHub and OSV ingestion depend on what the registry lists, hence the ordering.
-resolve_entities runs even if an ingest failed (trigger_rule=all_done): bronze keeps the last good data
-for that source, so one flaky API never blocks the catalog; dq_catalog flags stale sources.
+Packages are the curated seed list plus the packages the curated MCP servers declare; OSV checks the
+versions ingest_packages found, hence the ordering. resolve_entities runs even if an ingest failed
+(trigger_rule=all_done): bronze keeps the last good data for that source, so one flaky API never blocks
+the catalog; dq_catalog flags stale sources.
 """
 from datetime import datetime, timedelta
 
@@ -15,7 +13,7 @@ from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOpe
 from airflow.sdk import DAG
 from airflow.utils.trigger_rule import TriggerRule
 
-JOBS = "/opt/airs/spark-jobs/catalog"
+JOBS = "/opt/tracewell/spark-jobs/catalog"
 
 
 def spark_task(task_id: str, script: str, args: list[str] | None = None, **kwargs) -> SparkSubmitOperator:
@@ -25,7 +23,7 @@ def spark_task(task_id: str, script: str, args: list[str] | None = None, **kwarg
         application=f"{JOBS}/{script}",
         application_args=args or [],
         py_files=f"{JOBS}/common.py,{JOBS}/transforms.py",
-        name=f"airs-catalog-{task_id}",
+        name=f"tracewell-catalog-{task_id}",
         conf={
             "spark.driver.host": "airflow",
             "spark.driver.bindAddress": "0.0.0.0",
@@ -37,7 +35,7 @@ def spark_task(task_id: str, script: str, args: list[str] | None = None, **kwarg
 
 with DAG(
     dag_id="catalog_daily",
-    description="Ingest public AI asset sources, resolve entities, score with AIRS-Lite, merge SCD2, publish",
+    description="Ingest package and advisory sources, resolve entities, score with the Tracewell risk model, merge SCD2, publish",
     schedule="0 2 * * *",
     start_date=datetime(2026, 10, 1),
     catchup=False,
@@ -52,16 +50,11 @@ with DAG(
     tags=["phase1", "catalog"],
 ):
     init = spark_task("init_tables", "init_tables.py")
-    hf = spark_task("ingest_hf", "ingest_hf.py")
-    mcp = spark_task("ingest_mcp_registry", "ingest_mcp_registry.py")
     pkgs = spark_task("ingest_packages", "ingest_packages.py")
-    gh = spark_task("ingest_github", "ingest_github.py")
     osv = spark_task("ingest_osv", "ingest_osv.py")
     resolve = spark_task("resolve_entities", "resolve_entities.py", trigger_rule=TriggerRule.ALL_DONE)
     score = spark_task("score_assets", "score_assets.py")
     publish = spark_task("publish_risk_updates", "publish_risk_updates.py")
     dq = spark_task("dq_catalog", "dq_catalog.py", retries=0)
 
-    init >> [hf, mcp]
-    mcp >> pkgs >> [gh, osv]
-    [hf, gh, osv] >> resolve >> score >> publish >> dq
+    init >> pkgs >> osv >> resolve >> score >> publish >> dq

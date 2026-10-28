@@ -1,7 +1,7 @@
 """Phase 0 smoke test: Spark side of the shared Iceberg table.
 
 Usage (spark-submit ... smoke_spark.py <mode> [engine]):
-  init           drop + recreate airs.smoke.engine_writes and write 2 rows as "spark"
+  init           drop + recreate tracewell.smoke.engine_writes and write 2 rows as "spark"
   append ENGINE  append 2 rows tagged with ENGINE (used by the Airflow DAG)
   verify         check that spark, flink and airflow all wrote to the table
 """
@@ -9,7 +9,7 @@ import sys
 
 from pyspark.sql import SparkSession
 
-TABLE = "airs.smoke.engine_writes"
+TABLE = "tracewell.smoke.engine_writes"
 EXPECTED_ENGINES = {"spark", "flink", "airflow"}
 
 
@@ -23,7 +23,7 @@ def append(spark: SparkSession, engine: str, first_id: int) -> None:
 
 
 def init(spark: SparkSession) -> None:
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS airs.smoke")
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS tracewell.smoke")
     spark.sql(f"DROP TABLE IF EXISTS {TABLE} PURGE")
     spark.sql(f"""
         CREATE TABLE {TABLE} (
@@ -56,7 +56,7 @@ def verify(spark: SparkSession) -> None:
 
 def main() -> None:
     mode = sys.argv[1] if len(sys.argv) > 1 else "verify"
-    spark = SparkSession.builder.appName(f"airs-smoke-{mode}").getOrCreate()
+    spark = SparkSession.builder.appName(f"tracewell-smoke-{mode}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     try:
         if mode == "init":

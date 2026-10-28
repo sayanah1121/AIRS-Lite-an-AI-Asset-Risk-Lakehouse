@@ -17,7 +17,7 @@ ECOSYSTEM = {"pypi": "PyPI", "npm": "npm"}
 
 
 def package_versions(spark) -> list[tuple[str, str, str]]:
-    pkgs = latest_bronze(spark, "airs.bronze.pkg_metadata_raw").where(~F.col("payload").contains('"not_found":true'))
+    pkgs = latest_bronze(spark, "tracewell.bronze.pkg_metadata_raw").where(~F.col("payload").contains('"not_found":true'))
     rows = (pkgs.select("source", "record_key",
                         F.coalesce(F.get_json_object("payload", "$.info.version"),
                                    F.get_json_object("payload", "$.version")).alias("version"))
@@ -60,15 +60,15 @@ def main() -> None:
         for (eco, name, ver), ids in zip(chunk, query_batch(chunk)):
             queries.append((f"{eco}:{name}@{ver}", {"ecosystem": eco, "name": name, "version": ver, "vuln_ids": ids}))
             all_ids.update(ids)
-    write_bronze(spark, "airs.bronze.osv_advisories_raw", run_id, "osv_query", queries)
+    write_bronze(spark, "tracewell.bronze.osv_advisories_raw", run_id, "osv_query", queries)
 
-    known = {r.record_key for r in spark.table("airs.bronze.osv_advisories_raw")
+    known = {r.record_key for r in spark.table("tracewell.bronze.osv_advisories_raw")
              .where("source = 'osv_vuln'").select("record_key").distinct().collect()}
     new_ids = sorted(all_ids - known)
     log(f"{len(all_ids)} vulnerabilities referenced, {len(new_ids)} new to fetch")
     details = parallel_map(fetch_vuln, new_ids, workers=12)
     vulns = [(vid, d) for vid, d in zip(new_ids, details) if not isinstance(d, Exception)]
-    write_bronze(spark, "airs.bronze.osv_advisories_raw", run_id, "osv_vuln", vulns)
+    write_bronze(spark, "tracewell.bronze.osv_advisories_raw", run_id, "osv_vuln", vulns)
     affected = sum(1 for _, q in queries if q["vuln_ids"])
     log(f"done: {affected} of {len(queries)} package versions have open advisories")
     spark.stop()

@@ -2,15 +2,15 @@
 
 ## 1. Architecture at a glance
 
-AIRS-Lite follows a **Kappa-style streaming core with a batch intelligence layer**, and both share an **Iceberg lakehouse**.
+Tracewell follows a **Kappa-style streaming core with a batch intelligence layer**, and both share an **Iceberg lakehouse**.
 
 ```
  ┌──────────────── BATCH  (Airflow DAG: catalog_daily → SparkSubmit) ─────────────────┐
- │ Hugging Face Hub API ─┐                                                             │
- │ Official MCP Registry ┼─► Iceberg bronze ─► Spark: entity ─► Spark: AIRS scoring ─► │
- │ GitHub API (MCP repos)┤   (raw JSON)        resolution       (static + dynamic      │
- │ OSV.dev advisories    ┤                     → dim_asset       exposure from silver) │
- │ PyPI / npm metadata  ─┘                                              │              │
+ │ Curated catalog (CSV)─┐                                                             │
+ │ PyPI / npm metadata   ┼─► Iceberg bronze ─► Spark: entity ─► Spark: risk scoring  ─► │
+ │ OSV.dev advisories   ─┘   (raw JSON)        resolution       (static + dynamic      │
+ │                                             → dim_asset       exposure from silver) │
+ │                                                                      │              │
  │                         Iceberg: dim_asset_risk (SCD Type 2 via MERGE INTO)         │
  └──────────────────────────────────────────────────────────────┬──────────────────────┘
                      Spark publishes changed scores ───────────┐ │
@@ -44,13 +44,13 @@ AIRS-Lite follows a **Kappa-style streaming core with a batch intelligence layer
 ```mermaid
 flowchart TB
     subgraph External["External world"]
-        PUB[Public AI sources<br/>HF, MCP Registry, GitHub, OSV, PyPI/npm]
+        PUB[AI asset sources<br/>curated catalog, PyPI/npm, OSV]
         SIEM[SIEM / SOAR<br/>Splunk, Sentinel - export only]
     end
     subgraph Company["Simulated company"]
         FLEET[500 laptops<br/>device + browser + network sensors]
     end
-    subgraph Platform["AIRS-Lite platform"]
+    subgraph Platform["Tracewell platform"]
         CORE[Data platform]
     end
     subgraph Users
@@ -104,7 +104,7 @@ flowchart LR
 | Layer | Component | Responsibility |
 |---|---|---|
 | Sources | **Fleet simulator** (Python) | Produces realistic AI events from 500 devices: normal behaviour, attack scenarios, offline bursts, duplicates, clock skew |
-| Sources | **Public APIs** | Hugging Face Hub, MCP Registry, GitHub, OSV.dev, PyPI/npm |
+| Sources | **Curated seed + public APIs** | Curated catalog of AI services, agents, extensions, MCP servers and local models (CSV in git); AI packages discovered on npm (keyword searches, ranked by npm's score) and PyPI (AI-named projects from the simple index, most active first); OSV.dev advisories |
 | Transport | **Redpanda** | A durable, ordered event log that speaks the Kafka API. Its Schema Registry enforces Avro contracts. |
 | Processing | **Apache Flink** | Stateful real-time processing: redaction, dedupe, enrichment, policy, sessionization, exactly-once sinks |
 | Processing | **Apache Spark** | Batch ingestion, entity resolution, scoring, SCD2 merges, gold marts, investigations, table maintenance |
@@ -131,7 +131,7 @@ sequenceDiagram
     F->>F: 1. redact PII/PCI/secrets
     F->>F: 2. watermark + dedupe on event_id
     F->>B: 3. lookup asset risk (in memory)
-    B-->>F: AIRS score, band, sanctioned?
+    B-->>F: risk score, band, sanctioned?
     F->>F: 4. evaluate policy → allow / warn / block
     F->>R: verdict (verdicts topic)
     F->>I: enriched event (committed on checkpoint)
@@ -203,9 +203,9 @@ Even bronze events are **redacted**. Raw prompt text is never written to disk (s
 | Concern | Mechanism |
 |---|---|
 | Duplicate events | Flink keyed `ValueState` on `event_id` with a 48h TTL |
-| Late events | Event-time watermarks (5 min out-of-orderness), allowed lateness of 24h for windows, later events go to the `late-events` side output |
+| Late events | Event-time watermarks (5 min out-of-orderness). Every event, however late, is still enriched, judged and written to silver. Only the session windows care: an event that arrives after its window fired goes to the `late-events` side output, and the hourly Spark `late_event_backfill` re-sessionizes that device from silver and swaps the repaired sessions in with one atomic MERGE. Verified: a laptop flushing 12 h of activity produced exactly the 4 expected sessions |
 | Crash recovery | Flink checkpoints every 20 s (RocksDB, incremental), retained on cancel; `submit-flink` resumes from the newest one. Redpanda offsets and the Iceberg commit are part of each checkpoint, which gives exactly-once (verified through crashes: topic records = bronze rows). Long-running containers use `restart: unless-stopped`. |
-| Concurrent writes | Iceberg optimistic concurrency. Flink and Spark write *different* tables, except `dim_asset_risk`, which only Spark writes. |
+| Concurrent writes | Iceberg optimistic concurrency. Flink and Spark write *different* tables, with one exception: `fct_sessions`, where Flink appends and the Spark backfill MERGEs; the table uses snapshot isolation so the MERGE commits next to the appends. Spark compaction rewrites Flink's files without changing rows. |
 | Small files from streaming | Nightly `rewrite_data_files` compaction, plus `expire_snapshots` and `remove_orphan_files` |
 | Schema changes | Avro backward-compatible evolution; Iceberg column adds without rewriting data |
 | Bad data | Malformed records go to a dead-letter topic `ai-events-dlq` |
@@ -215,7 +215,7 @@ Even bronze events are **redacted**. Raw prompt text is never written to disk (s
 - **Redaction rules:** card numbers (regex + Luhn), emails, phone numbers, Indian PAN/Aadhaar patterns, API keys/tokens (known prefixes plus an entropy check), IBAN. Matches become `[REDACTED:PCI]` etc., and only *counts per entity type* are kept.
 - **Least data:** prompt text is truncated to 500 characters after redaction; file contents are never captured (only name, extension, size and a sensitivity label).
 - **Tamper evidence:** `audit_log.record_hash = SHA256(prev_hash ‖ canonical_json(record))`.
-- **Secrets:** API tokens (GitHub, HF) live in a `.env` file excluded from git and are passed to containers as environment variables.
+- **Secrets:** passwords and keys live in a `.env` file excluded from git and are passed to containers as environment variables. The catalog's public APIs (PyPI, npm, OSV) need no tokens.
 
 ## 9. Scalability notes (beyond the laptop)
 
@@ -229,10 +229,10 @@ Even bronze events are **redacted**. Raw prompt text is never written to disk (s
 
 ## 10. Mapping to the inspiration (SuperAlign product concepts)
 
-| AIRS-Lite component | Concept it mirrors |
+| Tracewell component | Concept it mirrors |
 |---|---|
 | Fleet simulator (device / browser / network sensors) | Surface endpoint agent, browser extension, network sensor (Radar) |
-| Risk catalog + AIRS-Lite score | AIRiskDB / AIRS score |
+| Risk catalog + Tracewell risk score | AIRiskDB / AIRS score |
 | Flink redaction | Redaction-aware capture / Prism |
 | Flink policy engine | Sentinel detection and enforcement |
 | Hash-chained audit log | Signal (immutable record) |

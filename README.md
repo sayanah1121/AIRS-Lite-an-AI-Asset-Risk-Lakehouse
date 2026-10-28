@@ -1,4 +1,4 @@
-# AIRS-Lite: AI Asset Risk Lakehouse
+# Tracewell: AI Asset Lineage & Risk Lakehouse
 
 > A real-time + batch data platform that **finds every AI tool being used inside a company, scores how risky each one is, catches sensitive data going into AI, and keeps a tamper-proof record of what happened.**
 
@@ -58,7 +58,7 @@ Think of **airport security, but for AI inside a company**.
 
 ### What it will do, step by step
 
-1. **Every day**, it collects information about real AI tools from public sources (Hugging Face, the official MCP Registry, GitHub, vulnerability databases) and gives each one a **risk score from 0 to 10**.
+1. **Every day**, it builds a catalog of AI tools (a curated list of AI services, coding agents, browser extensions, MCP servers and local models, plus about 20,000 real AI packages discovered on npm and PyPI, and their known vulnerabilities from OSV) and gives each one a **risk score from 0 to 10**.
 2. **All the time**, it receives activity from a simulated company of 500 laptops: who used which AI tool, what they typed, which files they uploaded.
 3. **For every action**, within a fraction of a second, it:
    - hides any sensitive data,
@@ -102,12 +102,10 @@ Think of **airport security, but for AI inside a company**.
 
 ```mermaid
 flowchart LR
-    subgraph Sources["Public AI asset sources"]
-        HF[Hugging Face Hub]
-        MCP[MCP Registry]
-        GH[GitHub]
-        OSV[OSV.dev]
+    subgraph Sources["AI asset sources"]
+        CUR[Curated catalog<br/>services, agents, extensions,<br/>MCP servers, local models]
         PKG[PyPI / npm]
+        OSV[OSV.dev]
     end
 
     SIM[Fleet Simulator<br/>500 laptops] -->|AI events| RP[(Redpanda<br/>event bus)]
@@ -134,7 +132,7 @@ flowchart LR
 | [02 – Architecture](docs/02-architecture.md) | Full architecture, component diagrams, data flows, design decisions |
 | [03 – Data Model](docs/03-data-model.md) | Event schemas, Redpanda topics, every Iceberg table |
 | [04 – Pipelines](docs/04-pipelines.md) | Each Flink job, Spark job and Airflow DAG in detail |
-| [05 – Risk Scoring](docs/05-risk-scoring.md) | The AIRS-Lite scoring method and the policy engine |
+| [05 – Risk Scoring](docs/05-risk-scoring.md) | The Tracewell risk scoring method and the policy engine |
 | [06 – Setup & Operations](docs/06-setup-and-operations.md) | Local environment, versions, how to run, monitoring, troubleshooting |
 | [07 – Roadmap](docs/07-roadmap.md) | Phased build plan with acceptance criteria |
 | [Company research](SuperAlign_DE_Project_Plan.md) | Research notes on SuperAlign and the original plan |
@@ -143,35 +141,41 @@ flowchart LR
 | Phase | Status |
 |---|---|
 | 0 · Environment | ✅ Done: 13-service Docker stack; smoke test passes (Spark + Flink + Airflow write one Iceberg table, Trino/Superset read it) |
-| 1 · Risk catalog | ✅ Done: 22,063 real AI assets (HF, MCP Registry, PyPI/npm, GitHub, OSV) resolved, scored, versioned (SCD2) and published to Redpanda by the `catalog_daily` DAG |
+| 1 · Risk catalog | ✅ Done: 20,011 AI assets (curated catalog + npm/PyPI discovery + OSV) resolved, scored, versioned (SCD2) and published to Redpanda by the `catalog_daily` DAG |
 | 2 · Streaming pipeline | ✅ Done: 500 simulated laptops → Redpanda → Flink (redact, dedupe, enrich from the live catalog, allow/warn/block) → Iceberg. p95 latency 229 ms; catalog updates apply in seconds without a restart; exactly-once verified through crashes |
 | 3 · Dashboards | ✅ Done: hourly Airflow `gold_marts` DAG (compaction → 6 Spark marts → 17 DQ checks) and 4 Superset dashboards built as code: Shadow AI (91% of shadow AI is invisible to network-only tools), Risk Posture with OWASP/NIST/EU AI Act evidence, AI ROI ($5.3k/month idle seats), Pipeline Health |
-| 4 · Sessions + investigation | ⏭️ Next |
-| 5 · Hardening & demos | Planned. See the [roadmap](docs/07-roadmap.md) |
+| 4 · Sessions + investigation | ✅ Done: Flink event-time session windows with a late-event side output; an hourly Spark backfill repairs sessions atomically (a laptop flushing 12 h of activity gives exactly the expected sessions); `investigate.py` puts the risk Flink enforced, the SCD2 as-of version, Iceberg time travel and today's profile side by side, plus blast radius; Investigation dashboard |
+| 5 · Hardening & demos | ⏭️ Next |
 
 ### Quick start
 ```bash
 cp .env.example .env
 ```
 ```bash
-./airs.sh up
+./tracewell.sh up
 ```
 ```bash
-./airs.sh smoke
+./tracewell.sh smoke
 ```
 ```bash
-./airs.sh catalog
+./tracewell.sh catalog
 ```
 ```bash
-./airs.sh init && ./airs.sh build-flink && ./airs.sh submit-flink
+./tracewell.sh init && ./tracewell.sh build-flink && ./tracewell.sh submit-flink
 ```
 ```bash
-./airs.sh simulate --rate 50 --duration 300 --scenarios rogue_mcp,finance_upload,secret_paste,poisoned_package
+./tracewell.sh simulate --rate 50 --duration 300 --scenarios rogue_mcp,finance_upload,secret_paste,poisoned_package
 ```
 ```bash
-./airs.sh stream-check
+./tracewell.sh stream-check
 ```
 ```bash
-./airs.sh gold && ./airs.sh dashboards
+./tracewell.sh gold && ./tracewell.sh dashboards
+```
+```bash
+./tracewell.sh backfill --full && ./tracewell.sh session-check
+```
+```bash
+./tracewell.sh investigate --session <session_id>
 ```
 UIs: Airflow http://localhost:8088 · Flink http://localhost:8081 · Spark http://localhost:8082 · Redpanda Console http://localhost:8080 · Trino http://localhost:8085 · Superset http://localhost:8089 · SeaweedFS filer http://localhost:8888

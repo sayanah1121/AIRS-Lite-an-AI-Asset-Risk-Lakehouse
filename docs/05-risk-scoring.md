@@ -1,6 +1,6 @@
-# 05 – Risk Scoring (AIRS-Lite) & Policy Engine
+# 05 – Risk Scoring (Tracewell) & Policy Engine
 
-AIRS-Lite gives every AI asset a **0–10 risk score**, where higher means riskier. It's built from three axes, inspired by publicly described approaches (capability, exposure, governance). The weights and rules below are this project's own and are fully transparent.
+Tracewell gives every AI asset a **0–10 risk score**, where higher means riskier. It's built from three axes, inspired by publicly described approaches (capability, exposure, governance). The weights and rules below are this project's own and are fully transparent.
 
 ## 1. Plain-language version
 
@@ -21,9 +21,9 @@ Each category has a starting value, because some kinds of asset exist to give AI
 |---|---|---|
 | `mcp_server`, `agent` | 3.0 | Their purpose is to hand an AI agent tools |
 | `model`, `ai_service`, `extension` | 2.0 | Generate content, read what users give them |
-| `package`, `dataset` | 1.0 | Libraries and data, passive on their own |
+| `package` | 1.0 | Libraries, passive on their own |
 
-Signals are keyword rules over the asset's text (name, description, keywords, tags, declared package names) or curated tags for seed assets. They don't apply to models or datasets.
+Signals are keyword rules over the asset's text (name, description, keywords, tags, declared package names) or curated tags for seed assets. They don't apply to models.
 
 | Signal (tag) | Points | Example trigger words |
 |---|---|---|
@@ -40,9 +40,9 @@ Signals are keyword rules over the asset's text (name, description, keywords, ta
 ### Exposure: how far it reaches
 | Signal | Contribution |
 |---|---|
-| Popularity percentile within its category (HF downloads, npm downloads, GitHub stars), in 0.5 steps | 0 – 5.0 |
+| Popularity percentile within its category (npm monthly downloads; PyPI has no download counts in its API, so PyPI-only packages get 0), in 0.5 steps | 0 – 5.0 |
 | Curated prior for seed assets (`popularity_hint`) | replaces the percentile |
-| Hosted remotely by a third party (MCP `remotes`) | +1.5 |
+| Hosted remotely by a third party (curated `is_remote`, e.g. Sentry and Atlassian remote MCP servers) | +1.5 |
 
 Percentiles are bucketed into 0.5 steps so day-to-day download noise doesn't create new SCD2 versions.
 **Phase 2** adds the *dynamic* part from fleet telemetry (devices, identities, sensitive-data hits).
@@ -63,7 +63,7 @@ Percentiles are bucketed into 0.5 steps so day-to-day download noise doesn't cre
 ## 3. Composite score
 
 ```
-airs_score = round( 0.35 × capability + 0.25 × exposure + 0.40 × governance , 1 )
+risk_score = round( 0.35 × capability + 0.25 × exposure + 0.40 × governance , 1 )
 ```
 
 Governance carries the largest weight. For third-party AI that the company didn't build, whether it can be trusted is the deciding factor.
@@ -126,9 +126,9 @@ The rule set in [`policies/default.yaml`](../policies/default.yaml):
   action: block
 ```
 
-Conditions: `sensitive_types_any`, `asset_sanctioned`, `asset_band_in`, `asset_known`, `event_type_in`, `tool_name_in`, `file_ext_in`. All the conditions that are set must hold. Unit tests: `flink-jobs/airs-stream/src/test/java/ai/airs/stream/PolicyRuleTest.java`.
+Conditions: `sensitive_types_any`, `asset_sanctioned`, `asset_band_in`, `asset_known`, `event_type_in`, `tool_name_in`, `file_ext_in`. All the conditions that are set must hold. Unit tests: `flink-jobs/tracewell-stream/src/test/java/ai/tracewell/stream/PolicyRuleTest.java`.
 
-Rules are evaluated in `priority` order, the first match wins, and the default is `allow`. Each verdict records the `policy_id` that fired. Publish edits with `./airs.sh policies`; removed rules are deleted with a tombstone.
+Rules are evaluated in `priority` order, the first match wins, and the default is `allow`. Each verdict records the `policy_id` that fired. Publish edits with `./tracewell.sh policies`; removed rules are deleted with a tombstone.
 
 **Observed on simulated traffic** (17,329 events): allow 15,717 · P005 619 · P006 453 · P004 244 · P007 137 · P003 89 · P001 49 · P002 21.
 

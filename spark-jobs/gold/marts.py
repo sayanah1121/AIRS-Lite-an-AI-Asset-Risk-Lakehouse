@@ -86,7 +86,7 @@ def shadow_ai(events: DataFrame, current: DataFrame, first_seen: DataFrame) -> D
                   F.max(F.col("sensor") == "network").alias("seen_by_network"),
                   band_name(F.max(band_rank(F.col("band_at_event")))).alias("max_band_at_event")))
     cur = current.select("asset_id", "asset_name", F.col("band").alias("current_band"),
-                         F.col("airs_score").cast("double").alias("current_airs_score"),
+                         F.col("risk_score").cast("double").alias("current_risk_score"),
                          F.col("sanctioned").alias("sanctioned_now"))
     return (daily.join(cur, "asset_id", "left").join(first_seen, "asset_id", "left")
             .select("day", "asset_id",
@@ -94,7 +94,7 @@ def shadow_ai(events: DataFrame, current: DataFrame, first_seen: DataFrame) -> D
                     F.when(F.col("asset_known"), F.col("category")).otherwise(F.lit("unknown")).alias("category"),
                     "asset_known",
                     F.coalesce("current_band", "max_band_at_event").alias("current_band"),
-                    "current_airs_score", "max_band_at_event",
+                    "current_risk_score", "max_band_at_event",
                     F.coalesce("sanctioned_now", F.lit(False)).alias("sanctioned_now"),
                     F.coalesce("first_seen", "first_seen_day").alias("first_seen"),
                     (F.to_date(F.coalesce("first_seen", "first_seen_day")) == F.col("day")).alias("is_new"),
@@ -124,18 +124,18 @@ def fleet_risk_posture(events: DataFrame) -> DataFrame:
     # Asset level first, so the averages weigh each asset once rather than each event.
     per_asset = (ev.groupBy("day", "department", "asset_id")
                  .agg(F.max(F.when(F.col("band_bucket") == "Unknown", 5).otherwise(band_rank(F.col("band_bucket"))))
-                      .alias("_rank"), F.max("airs_score_at_event").alias("airs"))
+                      .alias("_rank"), F.max("risk_score_at_event").alias("tracewell"))
                  .withColumn("band_bucket", F.when(F.col("_rank") == 5, "Unknown").otherwise(band_name(F.col("_rank"))))
                  .groupBy("day", "department")
                  .agg(F.countDistinct("asset_id").alias("distinct_assets"),
                       *[_count_if(F.col("band_bucket") == b).alias(f"assets_{b.lower()}") for b in buckets],
-                      F.round(F.avg("airs"), 2).alias("mean_airs_score"),
-                      F.max("airs").alias("max_airs_score")))
+                      F.round(F.avg("tracewell"), 2).alias("mean_risk_score"),
+                      F.max("tracewell").alias("max_risk_score")))
     return (per_event.join(per_asset, ["day", "department"])
             .withColumn("high_risk_event_pct", _pct(F.col("high_risk_events"), F.col("events")))
             .select("day", "department", "events", "active_people", "active_devices", "distinct_assets",
                     "assets_critical", "assets_high", "assets_medium", "assets_low", "assets_unknown",
-                    "mean_airs_score", "max_airs_score", "high_risk_events", "high_risk_event_pct",
+                    "mean_risk_score", "max_risk_score", "high_risk_events", "high_risk_event_pct",
                     "unsanctioned_events", "sensitive_events", "blocks", "warns"))
 
 
@@ -198,7 +198,7 @@ def ai_roi(events: DataFrame, licences: DataFrame, people: DataFrame, months: Da
 # ───────────────────────────── compliance evidence ─────────────────────────────
 
 def compliance_evidence(current: DataFrame, recent_events: DataFrame) -> DataFrame:
-    """asset (current version): the AIRS dimensions, the reasons, and the framework controls they map to.
+    """asset (current version): the risk dimensions, the reasons, and the framework controls they map to.
 
     recent_events: the last 30 days of silver.fct_ai_events; sensitive data seen in them adds LLM02 evidence.
     """
@@ -228,7 +228,7 @@ def compliance_evidence(current: DataFrame, recent_events: DataFrame) -> DataFra
 
     return df.select(
         "asset_id", "asset_name", "category", "publisher", "licence", "band",
-        *[F.col(c).cast("double").alias(c) for c in ("airs_score", "capability", "exposure", "governance")],
+        *[F.col(c).cast("double").alias(c) for c in ("risk_score", "capability", "exposure", "governance")],
         "sanctioned", "score_reasons",
         distinct_of("owasp").alias("owasp_llm"), distinct_of("nist").alias("nist_ai_rmf"),
         distinct_of("eu").alias("eu_ai_act"),

@@ -33,7 +33,7 @@ As a result, security, compliance and finance teams can't answer:
 
 ## 3. Solution summary
 
-**AIRS-Lite** is a data platform with two engines that share one lakehouse:
+**Tracewell** is a data platform with two engines that share one lakehouse:
 
 - **Batch intelligence (Spark + Airflow):** builds and maintains an **AI Asset Risk Catalog** from public sources and gives every asset a 0–10 risk score on three axes (Capability, Exposure, Governance), keeping the full history.
 - **Real-time decisions (Flink + Redpanda):** processes every AI event from the fleet as it happens. It redacts sensitive data, enriches the event with the asset's risk, applies policy (allow/warn/block), and groups events into sessions.
@@ -45,7 +45,7 @@ As a result, security, compliance and finance teams can't answer:
 
 | # | Goal | Measured by |
 |---|---|---|
-| G1 | Build a catalog of real AI assets with risk scores | ≥ 5,000 assets from ≥ 3 sources, all scored |
+| G1 | Build a catalog of real AI assets with risk scores | ≥ 15,000 assets from 4 sources (curated catalog, npm, PyPI, OSV), all scored and explained |
 | G2 | Make a real-time verdict for every event | p95 time from event to verdict < 1 s on a laptop |
 | G3 | Never store raw sensitive data | 0 PII/PCI matches in silver/gold (automated check) |
 | G4 | Handle late and duplicate events correctly | 0 duplicates; 100% of late events either merged or routed to the late topic |
@@ -59,7 +59,7 @@ As a result, security, compliance and finance teams can't answer:
 - Building a real endpoint agent or browser extension. Telemetry is **simulated**.
 - Production-grade ML classification of prompts. Redaction and detection are rule-based.
 - Multi-tenant SaaS, authentication or a UI beyond Superset.
-- Competing with or copying any vendor's proprietary scoring. AIRS-Lite is a transparent, documented approach of its own.
+- Competing with or copying any vendor's proprietary scoring. Tracewell is a transparent, documented approach of its own.
 
 ## 6. Users and the questions they ask
 

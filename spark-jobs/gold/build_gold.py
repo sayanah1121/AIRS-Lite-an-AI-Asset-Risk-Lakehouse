@@ -19,16 +19,16 @@ import marts
 from common import log, spark_session
 
 SEED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed")
-POLICY_DIR = os.environ.get("AIRS_POLICY_DIR", "/opt/airs/policies")
-EVENTS = "airs.silver.fct_ai_events"
-DIM = "airs.silver.dim_asset_risk"
+POLICY_DIR = os.environ.get("TRACEWELL_POLICY_DIR", "/opt/tracewell/policies")
+EVENTS = "tracewell.silver.fct_ai_events"
+DIM = "tracewell.silver.dim_asset_risk"
 PARTITION = {"shadow_ai": "day", "fleet_risk_posture": "day", "policy_hits": "day", "ai_roi": "month",
              "compliance_evidence": None, "pipeline_health": "day"}
 REFERENCE = {  # seed file -> table, schema
-    "licences.csv": ("airs.silver.dim_licence", "tool_id string, tool_name string, function string, department string, "
+    "licences.csv": ("tracewell.silver.dim_licence", "tool_id string, tool_name string, function string, department string, "
                                                 "seats int, cost_per_seat_month double"),
-    "people.csv": ("airs.silver.dim_identity", "identity string, department string"),
-    "devices.csv": ("airs.silver.dim_device", "device_id string, identity string, department string"),
+    "people.csv": ("tracewell.silver.dim_identity", "identity string, department string"),
+    "devices.csv": ("tracewell.silver.dim_device", "device_id string, identity string, department string"),
 }
 
 
@@ -100,12 +100,12 @@ def build(spark: SparkSession, mart: str, start: date | None, bootstrap: str) ->
             today = datetime.now(timezone.utc).date()
             months = months.unionByName(spark.sql(
                 f"SELECT explode(sequence(DATE'{first_month}', DATE'{today}', INTERVAL 1 MONTH)) AS month")).distinct()
-        return marts.ai_roi(scoped, spark.table("airs.silver.dim_licence"), spark.table("airs.silver.dim_identity"), months)
+        return marts.ai_roi(scoped, spark.table("tracewell.silver.dim_licence"), spark.table("tracewell.silver.dim_identity"), months)
     if mart == "compliance_evidence":
         recent = events.where(F.col("ts_event") >= F.expr("current_timestamp() - INTERVAL 30 DAYS"))
         return marts.compliance_evidence(current, recent)
     if mart == "pipeline_health":
-        return marts.pipeline_health(since(spark.table("airs.bronze.ai_events"), "ingested_at", start),
+        return marts.pipeline_health(since(spark.table("tracewell.bronze.ai_events"), "ingested_at", start),
                                      since(events, "processed_at", start), kafka_dlq(spark, bootstrap, start),
                                      until=datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0, tzinfo=None))
     raise ValueError(mart)
@@ -120,7 +120,7 @@ def main() -> None:
     args = ap.parse_args()
 
     spark = spark_session(f"gold-{args.mart}")
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS airs.gold")
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS tracewell.gold")
     if args.mart == "reference":
         for name, (table, schema) in REFERENCE.items():
             read_seed(spark, name, schema).writeTo(table).using("iceberg").createOrReplace()
@@ -129,7 +129,7 @@ def main() -> None:
         return
 
     start = None if args.full else datetime.now(timezone.utc).date() - timedelta(days=args.days - 1)
-    table = f"airs.gold.{args.mart}"
+    table = f"tracewell.gold.{args.mart}"
     n = write(build(spark, args.mart, start, args.bootstrap), table, PARTITION[args.mart])
     log(f"{table}: wrote {n} rows ({'all partitions' if start is None else f'partitions from {start}'})")
     spark.stop()

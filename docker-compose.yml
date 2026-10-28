@@ -1,10 +1,10 @@
-# AIRS-Lite local platform.
+# Tracewell local platform.
 # Profiles keep the laptop responsive:
 #   core  = redpanda, redpanda-console, seaweedfs (S3), iceberg-rest, flink
 #   batch = spark, postgres, airflow
 #   bi    = trino, superset
 #   stream = simulator (fleet of laptops producing AI events)
-# Start everything:  ./airs.sh up            (or: docker compose --profile core --profile batch --profile bi up -d)
+# Start everything:  ./tracewell.sh up            (or: docker compose --profile core --profile batch --profile bi up -d)
 
 x-s3-env: &s3-env
   AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
@@ -13,11 +13,10 @@ x-s3-env: &s3-env
   AWS_DEFAULT_REGION: ${AWS_REGION}
 
 x-catalog-env: &catalog-env
-  GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-  HF_TOKEN: ${HF_TOKEN:-}
-  CATALOG_MCP_MAX_PAGES: ${CATALOG_MCP_MAX_PAGES:-60}
-  CATALOG_HF_MODELS: ${CATALOG_HF_MODELS:-3000}
-  CATALOG_HF_DATASETS: ${CATALOG_HF_DATASETS:-1000}
+  CATALOG_MAX_PACKAGES: ${CATALOG_MAX_PACKAGES:-25000}
+  CATALOG_NPM_DISCOVER: ${CATALOG_NPM_DISCOVER:-12000}
+  CATALOG_PYPI_DISCOVER: ${CATALOG_PYPI_DISCOVER:-8000}
+  CATALOG_MIN_ASSETS: ${CATALOG_MIN_ASSETS:-15000}
 
 x-flink-properties: &flink-properties |
   jobmanager.rpc.address: flink-jobmanager
@@ -28,7 +27,7 @@ x-flink-properties: &flink-properties |
   state.backend.type: rocksdb
   state.backend.incremental: true
   state.checkpoints.dir: s3://checkpoints/flink
-  # keep checkpoints when a job is cancelled, so ./airs.sh submit-flink can resume from the latest one
+  # keep checkpoints when a job is cancelled, so ./tracewell.sh submit-flink can resume from the latest one
   execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
   s3.endpoint: http://seaweedfs:8333
   s3.path.style.access: true
@@ -90,7 +89,7 @@ services:
       - |
         mkdir -p /etc/seaweedfs
         cat > /etc/seaweedfs/s3.json <<EOF
-        {"identities":[{"name":"airs","credentials":[{"accessKey":"$${S3_ACCESS_KEY}","secretKey":"$${S3_SECRET_KEY}"}],"actions":["Admin","Read","Write","List","Tagging"]}]}
+        {"identities":[{"name":"tracewell","credentials":[{"accessKey":"$${S3_ACCESS_KEY}","secretKey":"$${S3_SECRET_KEY}"}],"actions":["Admin","Read","Write","List","Tagging"]}]}
         EOF
         exec weed server -dir=/data -ip=seaweedfs -ip.bind=0.0.0.0 -volume.max=0 -master.volumeSizeLimitMB=512 -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
     environment:
@@ -152,7 +151,7 @@ services:
 
   iceberg-rest:
     build: ./infra/iceberg-rest
-    image: airs/iceberg-rest:1.10.1
+    image: tracewell/iceberg-rest:1.10.1
     profiles: [core]
     environment:
       <<: *s3-env
@@ -176,7 +175,7 @@ services:
 
   flink-jobmanager:
     build: ./infra/flink
-    image: airs/flink:1.20.3
+    image: tracewell/flink:1.20.3
     profiles: [core]
     hostname: flink-jobmanager
     command: jobmanager
@@ -186,21 +185,21 @@ services:
     ports:
       - "8081:8081"
     volumes:
-      - ./flink-jobs:/opt/airs/flink-jobs
+      - ./flink-jobs:/opt/tracewell/flink-jobs
     depends_on:
       - iceberg-rest
     mem_limit: 900m
     restart: unless-stopped
 
   flink-taskmanager:
-    image: airs/flink:1.20.3
+    image: tracewell/flink:1.20.3
     profiles: [core]
     command: taskmanager
     environment:
       <<: *s3-env
       FLINK_PROPERTIES: *flink-properties
     volumes:
-      - ./flink-jobs:/opt/airs/flink-jobs
+      - ./flink-jobs:/opt/tracewell/flink-jobs
     depends_on:
       - flink-jobmanager
     mem_limit: 1800m
@@ -209,21 +208,21 @@ services:
   # ───────────────────────────── stream ─────────────────────────────
   simulator:
     build: ./simulator
-    image: airs/simulator:0.1
+    image: tracewell/simulator:0.1
     profiles: [stream]
     environment:
       KAFKA_BOOTSTRAP: redpanda:9092
       SCHEMA_REGISTRY_URL: http://redpanda:8081
     volumes:
-      - ./simulator:/opt/airs/simulator
-      - ./schemas:/opt/airs/schemas:ro
-      - ./policies:/opt/airs/policies:ro
+      - ./simulator:/opt/tracewell/simulator
+      - ./schemas:/opt/tracewell/schemas:ro
+      - ./policies:/opt/tracewell/policies:ro
     mem_limit: 512m
 
   # ───────────────────────────── batch ─────────────────────────────
   spark-master:
     build: ./infra/spark
-    image: airs/spark:3.5.8
+    image: tracewell/spark:3.5.8
     profiles: [batch]
     hostname: spark-master
     command: ["spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
@@ -233,16 +232,16 @@ services:
       - "8082:8080"   # Spark master UI
       - "7077:7077"
     volumes:
-      - ./spark-jobs:/opt/airs/spark-jobs
-      - ./tests:/opt/airs/tests
-      - ./schemas:/opt/airs/schemas:ro
+      - ./spark-jobs:/opt/tracewell/spark-jobs
+      - ./tests:/opt/tracewell/tests
+      - ./schemas:/opt/tracewell/schemas:ro
       - ./infra/spark/spark-defaults.conf:/opt/spark-conf/spark-defaults.conf:ro
       - ./infra/spark/log4j2.properties:/opt/spark-conf/log4j2.properties:ro
     mem_limit: 900m
     restart: unless-stopped
 
   spark-worker:
-    image: airs/spark:3.5.8
+    image: tracewell/spark:3.5.8
     profiles: [batch]
     hostname: spark-worker
     command: ["spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--cores", "2", "--memory", "1400m", "--webui-port", "8081"]
@@ -251,8 +250,8 @@ services:
     ports:
       - "8083:8081"   # Spark worker UI
     volumes:
-      - ./spark-jobs:/opt/airs/spark-jobs
-      - ./schemas:/opt/airs/schemas:ro
+      - ./spark-jobs:/opt/tracewell/spark-jobs
+      - ./schemas:/opt/tracewell/schemas:ro
       - ./infra/spark/spark-defaults.conf:/opt/spark-conf/spark-defaults.conf:ro
       - ./infra/spark/log4j2.properties:/opt/spark-conf/log4j2.properties:ro
     depends_on:
@@ -279,7 +278,7 @@ services:
 
   airflow:
     build: ./infra/airflow
-    image: airs/airflow:3.3.2
+    image: tracewell/airflow:3.3.2
     profiles: [batch]
     hostname: airflow   # Spark executors connect back to the driver by this name
     command: standalone
@@ -296,11 +295,11 @@ services:
       - "8088:8080"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
-      - ./spark-jobs:/opt/airs/spark-jobs
-      - ./schemas:/opt/airs/schemas:ro
+      - ./spark-jobs:/opt/tracewell/spark-jobs
+      - ./schemas:/opt/tracewell/schemas:ro
       - ./infra/spark/spark-defaults.conf:/opt/spark-conf/spark-defaults.conf:ro
       - ./infra/spark/log4j2.properties:/opt/spark-conf/log4j2.properties:ro
-      - ./policies:/opt/airs/policies:ro          # rule names for gold.policy_hits
+      - ./policies:/opt/tracewell/policies:ro          # rule names for gold.policy_hits
       - airflow-logs:/opt/airflow/logs
     depends_on:
       postgres:
@@ -324,16 +323,16 @@ services:
 
   superset:
     build: ./infra/superset
-    image: airs/superset:6.1.0
+    image: tracewell/superset:6.1.0
     profiles: [bi]
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
       SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
-    command: ["/bin/bash", "/app/docker/airs-init.sh"]
+    command: ["/bin/bash", "/app/docker/tracewell-init.sh"]
     ports:
       - "8089:8088"
     volumes:
-      - ./infra/superset/airs-init.sh:/app/docker/airs-init.sh:ro
+      - ./infra/superset/tracewell-init.sh:/app/docker/tracewell-init.sh:ro
       - superset-home:/app/superset_home
     mem_limit: 1g
     restart: unless-stopped

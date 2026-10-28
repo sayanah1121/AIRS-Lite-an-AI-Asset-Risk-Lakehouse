@@ -1,7 +1,7 @@
 {
   "type": "record",
   "name": "AiEvent",
-  "namespace": "ai.airs.stream",
+  "namespace": "ai.tracewell.stream",
   "doc": "One AI action observed on one device by the device, browser or network sensor. Key = device_id.",
   "fields": [
     {"name": "event_id",        "type": "string", "doc": "UUID; idempotency key (devices may resend)"},

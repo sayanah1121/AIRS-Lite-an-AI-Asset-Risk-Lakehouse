@@ -10,9 +10,9 @@ import os
 import yaml
 from confluent_kafka import Producer
 
-from airs_kafka import BOOTSTRAP, ensure_topics, read_compacted
+from tracewell_kafka import BOOTSTRAP, ensure_topics, read_compacted
 
-POLICY_DIR = os.environ.get("POLICY_DIR", "/opt/airs/policies")
+POLICY_DIR = os.environ.get("POLICY_DIR", "/opt/tracewell/policies")
 
 
 def main() -> None:

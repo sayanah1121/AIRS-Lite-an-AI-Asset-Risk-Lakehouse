@@ -6,6 +6,7 @@ purpose: offline devices that flush hours-old events later, duplicate sends, clo
 catalog has never seen, and prompts that contain fake personal data, test card numbers or API keys.
 
   python simulator.py --rate 50 --duration 600 --scenarios rogue_mcp,finance_upload,secret_paste,poisoned_package
+  python simulator.py --duration 60 --scenarios offline_burst      # a laptop flushing 12 h of activity at once
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from collections import Counter, deque
 from confluent_kafka import Consumer, Producer
 from faker import Faker
 
-from airs_kafka import BOOTSTRAP, encode, ensure_topics, read_compacted, register_schema
+from tracewell_kafka import BOOTSTRAP, encode, ensure_topics, read_compacted, register_schema
 
 fake = Faker()
 DEPARTMENTS = {  # department: (share of people, preferred categories)
@@ -38,7 +39,7 @@ TOOLS = ["read_file", "write_file", "query", "search", "fetch", "list_issues", "
 FILES = ["finance_q3.xlsx", "customers.csv", "roadmap.pptx", "meeting_notes.docx", "contract_draft.pdf",
          "salaries.xlsx", "architecture.png", "incident_report.md"]
 HOSTS = ["api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "api.deepseek.com",
-         "api.perplexity.ai", "api.mistral.ai", "huggingface.co", "api.cursor.sh"]
+         "api.perplexity.ai", "api.mistral.ai", "api.groq.com", "api.cursor.sh"]
 PROMPTS = [
     "Summarise this meeting transcript into five bullet points",
     "Write a polite follow-up email to the client about the delayed invoice",
@@ -92,7 +93,7 @@ def pick_assets(by_cat: dict[str, list[dict]]) -> dict[str, list[dict]]:
         "ai_service": by_cat.get("ai_service", []),
         "agent": by_cat.get("agent", []),
         "extension": by_cat.get("extension", []),
-        "package": by_cat.get("package", []),
+        "package": rng.sample(by_cat.get("package", []), min(300, len(by_cat.get("package", [])))),
         "model": rng.sample(by_cat.get("model", []), min(40, len(by_cat.get("model", [])))),
         "mcp_server": rng.sample(mcp, min(90, len(mcp))) + rng.sample(risky, min(30, len(risky))),
     }
@@ -129,6 +130,10 @@ class Fleet:
                 **person, "installed": installed, "seen": set(),
                 "skew_ms": self.rng.choice([0] * 32 + [self.rng.randint(-120_000, 120_000)]),
                 "offline_until": 0.0, "buffer": [],
+                # Working rhythm (a compressed day): active 4-15 min, then idle 12-40 min, at a random phase.
+                # Idle periods longer than the 10-min session gap are what end a session.
+                "active_s": self.rng.uniform(240, 900), "idle_s": self.rng.uniform(720, 2400),
+                "phase_s": self.rng.uniform(0, 3300),
             })
 
     def ref_for(self, asset: dict) -> str:
@@ -196,6 +201,48 @@ def events_for(fleet: Fleet, dev: dict, asset: dict, now_ms: int, sensitive_rate
 
 # ───────────────────────────── scenarios ─────────────────────────────
 
+def is_working(dev: dict, t: float) -> bool:
+    return (t + dev["phase_s"]) % (dev["active_s"] + dev["idle_s"]) < dev["active_s"]
+
+
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+
+
+def offline_burst(fleet: Fleet, now_ms: int) -> list[dict]:
+    """A laptop that was offline for 12 h (a long flight) comes back and sends everything at once.
+
+    Four work sessions with known boundaries, events 15-120 s apart inside a session and 40+ min of silence
+    between sessions. Every event is far behind Flink's watermark, so all of it reaches the late-events
+    side output and the session table only gets these sessions through the Spark backfill. The expected
+    sessions are written to simulator/out/offline_burst_expected.json for checking.
+    """
+    person = next(p for p in fleet.people if p["department"] == "engineering")
+    dev = {"device_id": f"WX-T{now_ms % 100000:05d}", "os": "macos", **person, "skew_ms": 0, "seen": set()}
+    assets = [a for cat in ("agent", "ai_service", "mcp_server") for a in fleet.pool.get(cat, [])[:3]]
+    rng = random.Random(now_ms)
+    windows_h = [(12.0, 11.2), (9.0, 8.3), (5.0, 3.8), (1.5, 0.7)]       # (start, end) hours ago
+    events, expected = [], []
+    for start_h, end_h in windows_h:
+        t = now_ms - int(start_h * 3600_000)
+        stop = now_ms - int(end_h * 3600_000)
+        first, last, n = t, t, 0
+        while t <= stop:
+            for ev in events_for(fleet, dev, rng.choice(assets), t, 0.04):
+                ev["ts_sent"] = now_ms
+                events.append(ev)
+                n += 1
+                last = ev["ts_event"]
+            t += rng.randint(15_000, 120_000)
+        expected.append({"session_start_ms": first, "session_end_ms": last, "event_count": n})
+    os.makedirs(OUT_DIR, exist_ok=True)
+    with open(os.path.join(OUT_DIR, "offline_burst_expected.json"), "w", encoding="utf-8") as f:
+        json.dump({"device_id": dev["device_id"], "identity": dev["identity"], "sent_at_ms": now_ms,
+                   "sessions": expected}, f, indent=2)
+    print(f"  offline_burst: {dev['device_id']} ({dev['identity']}) flushes {len(events)} events from the last 12 h "
+          f"in {len(expected)} sessions -> simulator/out/offline_burst_expected.json", flush=True)
+    return events
+
+
 def scenario_events(name: str, fleet: Fleet, now_ms: int) -> list[dict]:
     eng = [d for d in fleet.devices if d["department"] == "engineering"]
     fin = [d for d in fleet.devices if d["department"] == "finance"] or fleet.devices
@@ -213,6 +260,8 @@ def scenario_events(name: str, fleet: Fleet, now_ms: int) -> list[dict]:
     if name == "poisoned_package":
         return [make_event(d, None, "pypi:chromadb", "asset_discovered", "device", now_ms + i * 500, asset_version="latest")
                 for i, d in enumerate(fleet.rng.sample(eng or fleet.devices, 3))]
+    if name == "offline_burst":
+        return offline_burst(fleet, now_ms)
     raise ValueError(name)
 
 
@@ -265,7 +314,10 @@ def main() -> None:
     ap.add_argument("--duplicate-rate", type=float, default=0.01)
     ap.add_argument("--offline-rate", type=float, default=0.002, help="chance per tick that a device goes offline")
     ap.add_argument("--unknown-rate", type=float, default=0.02)
-    ap.add_argument("--scenarios", default="", help="comma list: rogue_mcp,finance_upload,secret_paste,poisoned_package")
+    ap.add_argument("--scenarios", default="",
+                    help="comma list: rogue_mcp,finance_upload,secret_paste,poisoned_package,offline_burst")
+    ap.add_argument("--work-pattern", action=argparse.BooleanOptionalAction, default=True,
+                    help="devices alternate working and idle periods (so sessions end); --no-work-pattern = always busy")
     ap.add_argument("--scenario-after", type=float, default=30, help="seconds before scenarios start")
     ap.add_argument("--export-directory", metavar="DIR",
                     help="write the company directory (people.csv, devices.csv) to DIR and exit")
@@ -297,6 +349,10 @@ def main() -> None:
         n = random.random() < (args.rate * tick) % 1
         for _ in range(int(args.rate * tick) + n):
             dev = fleet.rng.choice(fleet.devices)
+            for _ in range(20):                               # prefer someone who is working right now
+                if not args.work_pattern or is_working(dev, t0):
+                    break
+                dev = fleet.rng.choice(fleet.devices)
             if dev["offline_until"] and t0 >= dev["offline_until"]:
                 for ev in dev["buffer"]:                      # back online: flush buffered events
                     ev["ts_sent"] = now_ms

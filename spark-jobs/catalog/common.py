@@ -15,7 +15,7 @@ from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, StructField, StructType, TimestampType
 
-USER_AGENT = "airs-lite-risk-catalog/0.1 (learning project)"
+USER_AGENT = "tracewell-risk-catalog/0.1 (learning project)"
 
 BRONZE_SCHEMA = StructType([
     StructField("run_id", StringType(), False),
@@ -35,7 +35,7 @@ def utcnow() -> datetime:
 
 
 def spark_session(app: str) -> SparkSession:
-    spark = SparkSession.builder.appName(f"airs-catalog-{app}").getOrCreate()
+    spark = SparkSession.builder.appName(f"tracewell-catalog-{app}").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark
 
@@ -120,7 +120,7 @@ def latest_bronze(spark: SparkSession, table: str, source: str | None = None) ->
 
 # ───────────────────────────── pipeline state ─────────────────────────────
 
-STATE_TABLE = "airs.ops.pipeline_state"
+STATE_TABLE = "tracewell.ops.pipeline_state"
 
 
 def get_state(spark: SparkSession, component: str, key: str) -> str | None:

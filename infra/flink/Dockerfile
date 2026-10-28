@@ -5,7 +5,7 @@ ARG HADOOP_VERSION=3.3.6
 ARG MAVEN=https://repo1.maven.org/maven2
 
 # Iceberg (Flink runtime + AWS S3FileIO) and the Hadoop client classes Iceberg needs.
-# The Kafka connector is bundled in each job jar (flink-jobs/airs-stream), not installed here: the shaded
+# The Kafka connector is bundled in each job jar (flink-jobs/tracewell-stream), not installed here: the shaded
 # flink-sql-connector-kafka would relocate Kafka classes and clash with DataStream jobs that read keys.
 ADD --chown=flink:flink ${MAVEN}/org/apache/iceberg/iceberg-flink-runtime-1.20/${ICEBERG_VERSION}/iceberg-flink-runtime-1.20-${ICEBERG_VERSION}.jar /opt/flink/lib/
 ADD --chown=flink:flink ${MAVEN}/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar /opt/flink/lib/

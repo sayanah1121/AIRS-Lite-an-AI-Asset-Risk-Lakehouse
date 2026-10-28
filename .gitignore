@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 target/
 *.log
+simulator/out/

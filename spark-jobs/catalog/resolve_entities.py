@@ -1,15 +1,15 @@
 """Normalise every source into silver.asset_candidates and resolve candidates into canonical assets.
 
-One real-world asset often appears several times: an MCP server in the registry, its npm or PyPI
-package, and its GitHub repo. Resolution links MCP servers and packages with three rules (strongest
-first), then takes connected components:
-  1. declared_package - the registry entry lists the package identifier (ground truth)
+Sources: PyPI/npm package metadata (with OSV advisories) and the curated seed of AI services, agents,
+extensions, MCP servers and local models (seed/curated_assets.csv). One real-world asset often appears
+twice: a curated MCP server and the npm or PyPI package that ships it. Resolution links MCP servers and
+packages with three rules (strongest first), then takes connected components:
+  1. declared_package - the curated entry lists the package identifier (ground truth)
   2. shared_repo      - same GitHub repo, with a monorepo guard: only when that repo hosts at most one
                         MCP server, one npm and one PyPI package (e.g. modelcontextprotocol/servers
-                        hosts dozens of servers and must not merge them)
+                        hosts many servers and must not merge them)
   3. fuzzy_name       - normalised names within Levenshtein similarity >= 0.9, only when the name is
                         unique on both sides
-GitHub repos are not assets themselves; they enrich candidates (stars, archived, last push, licence).
 Rules 2 and 3 are scored against rule 1 and written to ops.entity_resolution_metrics.
 """
 import csv
@@ -25,14 +25,13 @@ SEED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed")
 SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MODERATE": 2, "MEDIUM": 2, "LOW": 1}
 CANDIDATE_COLS = [
     "candidate_id", "native_id", "source", "category", "name", "norm_name", "description", "publisher",
-    "licence", "repo", "package_key", "declared_packages", "version", "popularity", "stars",
-    "last_updated", "archived", "deprecated", "is_remote", "gated", "pipeline_tag", "capability_text",
+    "licence", "repo", "package_key", "declared_packages", "version", "popularity",
+    "last_updated", "archived", "deprecated", "is_remote", "pipeline_tag", "capability_text",
     "capability_tags", "popularity_hint", "vuln_ids", "vuln_max_severity", "malicious",
 ]
 NULLS = {
     "repo": "string", "package_key": "string", "declared_packages": "array<string>", "version": "string",
-    "stars": "bigint", "archived": "boolean", "deprecated": "boolean", "is_remote": "boolean",
-    "gated": "boolean", "pipeline_tag": "string", "capability_tags": "array<string>",
+    "archived": "boolean", "deprecated": "boolean", "is_remote": "boolean", "pipeline_tag": "string", "capability_tags": "array<string>",
     "popularity_hint": "double", "vuln_ids": "array<string>", "vuln_max_severity": "string",
     "malicious": "boolean", "popularity": "bigint", "last_updated": "timestamp", "licence": "string",
     "description": "string", "publisher": "string",
@@ -61,60 +60,8 @@ def conform(df: DataFrame) -> DataFrame:
 
 # ───────────────────────────── per-source candidates ─────────────────────────────
 
-def hf_candidates(spark: SparkSession) -> DataFrame:
-    raw = latest_bronze(spark, "airs.bronze.hf_models_raw")
-    tags = F.from_json(j("$.tags"), "array<string>")
-    lic = F.element_at(F.filter(tags, lambda t: t.startswith("license:")), 1)
-    rid = F.lower(F.col("record_key"))
-    category = F.when(F.col("source") == "hf_model", "model").otherwise("dataset")
-    return conform(raw.select(
-        F.concat_ws(":", "source", rid).alias("candidate_id"),
-        F.concat(category, F.lit(":hf/"), rid).alias("native_id"),
-        F.col("source"), category.alias("category"),
-        F.col("record_key").alias("name"),
-        norm_name(F.col("record_key")).alias("norm_name"),
-        F.lower(F.coalesce(j("$.author"), F.split("record_key", "/")[0])).alias("publisher"),
-        F.regexp_replace(lic, "^license:", "").alias("licence"),
-        j("$.downloads").cast("bigint").alias("popularity"),
-        ts(j("$.lastModified")).alias("last_updated"),
-        (F.coalesce(j("$.gated"), F.lit("false")) != "false").alias("gated"),
-        j("$.pipeline_tag").alias("pipeline_tag"),
-        F.lower(F.concat_ws(" ", F.col("record_key"), j("$.pipeline_tag"), F.array_join(tags, " "))).alias("capability_text"),
-    ))
-
-
-def mcp_candidates(spark: SparkSession) -> DataFrame:
-    raw = latest_bronze(spark, "airs.bronze.mcp_registry_raw")
-    pkgs = F.from_json(j("$.server.packages"), "array<struct<registryType:string,identifier:string>>")
-    remotes = F.from_json(j("$.server.remotes"), "array<struct<type:string,url:string>>")
-    declared = F.filter(F.transform(pkgs, lambda p: F.when(p.registryType == "npm", npm_key(p.identifier))
-                                    .when(p.registryType == "pypi", pypi_key(p.identifier))),
-                        lambda k: k.isNotNull())
-    name = F.col("record_key")
-    namespace = F.split(name, "/")[0]
-    publisher = F.when(namespace.startswith("io.github."), F.regexp_replace(namespace, r"^io\.github\.", "")) \
-        .otherwise(namespace)
-    status = j("$._meta['io.modelcontextprotocol.registry/official'].status")
-    return conform(raw.select(
-        F.concat(F.lit("mcp_registry:"), F.lower(name)).alias("candidate_id"),
-        F.concat(F.lit("mcp:"), F.lower(name)).alias("native_id"),
-        F.lit("mcp_registry").alias("source"), F.lit("mcp_server").alias("category"),
-        name.alias("name"), norm_name(name).alias("norm_name"),
-        j("$.server.description").alias("description"),
-        F.lower(publisher).alias("publisher"),
-        github_repo(j("$.server.repository.url")).alias("repo"),
-        declared.alias("declared_packages"),
-        j("$.server.version").alias("version"),
-        ts(j("$._meta['io.modelcontextprotocol.registry/official'].updatedAt")).alias("last_updated"),
-        (F.coalesce(status, F.lit("active")) != "active").alias("deprecated"),
-        (F.coalesce(F.size(remotes), F.lit(0)) > 0).alias("is_remote"),
-        F.lower(F.concat_ws(" ", name, j("$.server.title"), j("$.server.description"),
-                            F.array_join(F.transform(pkgs, lambda p: p.identifier), " "))).alias("capability_text"),
-    ))
-
-
 def package_candidates(spark: SparkSession) -> DataFrame:
-    raw = latest_bronze(spark, "airs.bronze.pkg_metadata_raw").where(~F.col("payload").contains('"not_found":true'))
+    raw = latest_bronze(spark, "tracewell.bronze.pkg_metadata_raw").where(~F.col("payload").contains('"not_found":true'))
     pypi_urls = F.map_values(F.from_json(j("$.info.project_urls"), "map<string,string>"))
     pypi_repo = F.element_at(F.filter(F.transform(pypi_urls, github_repo), lambda r: r.isNotNull()), 1)
     pypi = raw.where("source = 'pypi'").select(
@@ -156,16 +103,23 @@ def package_candidates(spark: SparkSession) -> DataFrame:
 
 
 def seed_candidates(spark: SparkSession) -> DataFrame:
-    with open(os.path.join(SEED_DIR, "ai_services.csv"), newline="", encoding="utf-8") as f:
+    with open(os.path.join(SEED_DIR, "curated_assets.csv"), newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     df = spark.createDataFrame(rows)
+    declared = F.transform(F.filter(F.split("packages", ";"), lambda k: k != ""),
+                           lambda k: F.when(k.startswith("pypi:"), pypi_key(F.substring_index(k, ":", -1)))
+                           .otherwise(npm_key(F.substring_index(k, ":", -1))))
     return conform(df.select(
         F.concat(F.lit("seed:"), "asset_id").alias("candidate_id"),
         F.col("asset_id").alias("native_id"),
         F.lit("seed").alias("source"), F.col("category"), F.col("name"),
         norm_name(F.col("name")).alias("norm_name"),
-        F.col("description"), F.col("publisher"), F.col("licence"),
-        F.split("capability_tags", ";").alias("capability_tags"),
+        F.col("description"), F.col("publisher"), nullif(F.col("licence"), F.lit("")).alias("licence"),
+        nullif(F.col("repo"), F.lit("")).alias("repo"),
+        F.when(F.size(declared) > 0, declared).alias("declared_packages"),
+        nullif(F.col("pipeline_tag"), F.lit("")).alias("pipeline_tag"),
+        (F.col("is_remote") == "true").alias("is_remote"),
+        F.filter(F.split("capability_tags", ";"), lambda t: t != "").alias("capability_tags"),
         F.col("popularity_hint").cast("double").alias("popularity_hint"),
         F.current_timestamp().alias("last_updated"),
         F.lower(F.concat_ws(" ", "name", "description")).alias("capability_text"),
@@ -175,15 +129,7 @@ def seed_candidates(spark: SparkSession) -> DataFrame:
 # ───────────────────────────── enrichment ─────────────────────────────
 
 def enrich(spark: SparkSession, cands: DataFrame) -> DataFrame:
-    gh = latest_bronze(spark, "airs.bronze.github_repos_raw").where(~F.col("payload").contains('"not_found":true')) \
-        .select(F.col("record_key").alias("repo"),
-                j("$.stargazers_count").cast("bigint").alias("gh_stars"),
-                (j("$.archived") == "true").alias("gh_archived"),
-                ts(j("$.pushed_at")).alias("gh_pushed_at"),
-                nullif(j("$.license"), F.lit("NOASSERTION")).alias("gh_licence"),
-                F.lower(j("$.owner_login")).alias("gh_owner"))
-
-    osv = latest_bronze(spark, "airs.bronze.osv_advisories_raw")
+    osv = latest_bronze(spark, "tracewell.bronze.osv_advisories_raw")
     sev_rank = F.create_map(*[x for k, v in SEVERITY_RANK.items() for x in (F.lit(k), F.lit(v))])
     vulns = osv.where("source = 'osv_vuln'").select(
         F.col("record_key").alias("vuln_id"),
@@ -203,19 +149,12 @@ def enrich(spark: SparkSession, cands: DataFrame) -> DataFrame:
                       F.max(F.coalesce("is_mal", F.lit(False))).alias("osv_mal")))
     pkg_name_key = F.regexp_replace(F.col("package_key"), r"^(pypi|npm):", "")
 
-    out = (cands.join(gh, "repo", "left")
-           .join(pkg_vulns, (F.concat(F.col("source"), F.lit(":"), pkg_name_key) == F.col("osv_pkg"))
-                 & (F.col("version") == F.col("osv_version")), "left"))
+    out = cands.join(pkg_vulns, (F.concat(F.col("source"), F.lit(":"), pkg_name_key) == F.col("osv_pkg"))
+                     & (F.col("version") == F.col("osv_version")), "left")
     return out.select(
-        *[c for c in CANDIDATE_COLS if c not in
-          ("stars", "archived", "last_updated", "licence", "publisher", "popularity",
-           "vuln_ids", "vuln_max_severity", "malicious")],
-        F.col("gh_stars").alias("stars"),
-        F.coalesce("archived", "gh_archived").alias("archived"),
-        F.greatest("last_updated", "gh_pushed_at").alias("last_updated"),
-        F.coalesce(nullif(F.col("licence"), F.lit("")), "gh_licence").alias("licence"),
-        F.coalesce(nullif(F.col("publisher"), F.lit("")), "gh_owner").alias("publisher"),
-        F.coalesce("popularity", "gh_stars").alias("popularity"),
+        *[c for c in CANDIDATE_COLS if c not in ("licence", "publisher", "vuln_ids", "vuln_max_severity", "malicious")],
+        nullif(F.col("licence"), F.lit("")).alias("licence"),
+        nullif(F.col("publisher"), F.lit("")).alias("publisher"),
         F.coalesce("osv_ids", "vuln_ids").alias("vuln_ids"),
         F.coalesce("osv_sev", "vuln_max_severity").alias("vuln_max_severity"),
         F.coalesce("osv_mal", "malicious", F.lit(False)).alias("malicious"),
@@ -225,20 +164,20 @@ def enrich(spark: SparkSession, cands: DataFrame) -> DataFrame:
 # ───────────────────────────── entity resolution ─────────────────────────────
 
 def edges_declared(c: DataFrame) -> DataFrame:
-    mcp = c.where("source = 'mcp_registry'").select("candidate_id", F.explode("declared_packages").alias("package_key"))
+    mcp = c.where("category = 'mcp_server'").select("candidate_id", F.explode("declared_packages").alias("package_key"))
     pkg = c.where("category = 'package'").select(F.col("candidate_id").alias("dst"), "package_key")
     return mcp.join(pkg, "package_key").select(F.col("candidate_id").alias("src"), "dst", F.lit("declared_package").alias("rule"))
 
 
 def edges_shared_repo(c: DataFrame) -> DataFrame:
-    nodes = c.where("source IN ('mcp_registry', 'npm', 'pypi') AND repo IS NOT NULL")
-    guard = (nodes.groupBy("repo").agg(F.count("*").alias("n"), F.countDistinct("source").alias("s"),
-                                       F.sum(F.when(F.col("source") == "mcp_registry", 1).otherwise(0)).alias("mcp"))
+    nodes = c.where("category IN ('mcp_server', 'package') AND repo IS NOT NULL")         .withColumn("kind", F.when(F.col("category") == "mcp_server", "mcp").otherwise(F.col("source")))
+    guard = (nodes.groupBy("repo").agg(F.count("*").alias("n"), F.countDistinct("kind").alias("s"),
+                                       F.sum(F.when(F.col("kind") == "mcp", 1).otherwise(0)).alias("mcp"))
              .where("n = s AND mcp = 1 AND n > 1"))  # at most one node per source, exactly one MCP server
-    members = nodes.join(guard.select("repo"), "repo").select("repo", "candidate_id", "source")
+    members = nodes.join(guard.select("repo"), "repo").select("repo", "candidate_id", "kind")
     a, b = members.alias("a"), members.alias("b")
-    return (a.join(b, (F.col("a.repo") == F.col("b.repo")) & (F.col("a.source") == "mcp_registry")
-                   & (F.col("b.source") != "mcp_registry"))
+    return (a.join(b, (F.col("a.repo") == F.col("b.repo")) & (F.col("a.kind") == "mcp")
+                   & (F.col("b.kind") != "mcp"))
             .select(F.col("a.candidate_id").alias("src"), F.col("b.candidate_id").alias("dst"),
                     F.lit("shared_repo").alias("rule")))
 
@@ -248,7 +187,7 @@ def edges_fuzzy(c: DataFrame) -> DataFrame:
         once = df.groupBy("norm_name").count().where("count = 1").select("norm_name")
         return df.join(once, "norm_name").withColumn("block", F.substring("norm_name", 1, 3))
     base = c.where("norm_name IS NOT NULL AND length(norm_name) >= 4")
-    mcp = unique_side(base.where("source = 'mcp_registry'").select("candidate_id", "norm_name", "publisher")).alias("m")
+    mcp = unique_side(base.where("category = 'mcp_server'").select("candidate_id", "norm_name", "publisher")).alias("m")
     pkg = unique_side(base.where("category = 'package'")
                       .select("candidate_id", "norm_name", "publisher",
                               F.split("repo", "/")[0].alias("owner"),
@@ -284,7 +223,7 @@ def connected_components(nodes: DataFrame, edges: DataFrame, max_iter: int = 20)
     Labels are '<priority><candidate_id>' so the winning label is the highest-priority member
     (MCP server, then package), which becomes the canonical asset.
     """
-    prio = F.when(F.col("source") == "mcp_registry", "1").when(F.col("category") == "package", "2").otherwise("3")
+    prio = F.when(F.col("category") == "mcp_server", "1").when(F.col("category") == "package", "2").otherwise("3")
     labels = nodes.select("candidate_id", F.concat(prio, F.col("candidate_id")).alias("label")).localCheckpoint()
     und = edges.select("src", "dst").unionByName(edges.select(F.col("dst").alias("src"), F.col("src").alias("dst"))).distinct().cache()
     for i in range(max_iter):
@@ -317,13 +256,12 @@ def evaluate(edges: DataFrame) -> tuple[int, int, int]:
 
 def main() -> None:
     spark = spark_session("resolve-entities")
-    raw = (hf_candidates(spark).unionByName(mcp_candidates(spark)).unionByName(package_candidates(spark))
-           .unionByName(seed_candidates(spark)))
+    raw = package_candidates(spark).unionByName(seed_candidates(spark))
     cands = enrich(spark, raw).dropDuplicates(["candidate_id"]).localCheckpoint()
     counts = {r.source: r["count"] for r in cands.groupBy("source").count().collect()}
     log(f"candidates by source: {counts}")
 
-    linkable = cands.where("source IN ('mcp_registry', 'npm', 'pypi')")
+    linkable = cands.where("category IN ('mcp_server', 'package')")
     edges = edges_declared(linkable).unionByName(edges_shared_repo(linkable)).unionByName(edges_fuzzy(linkable)).cache()
     log(f"edges by rule: { {r.rule: r['count'] for r in edges.groupBy('rule').count().collect()} }")
 
@@ -334,7 +272,7 @@ def main() -> None:
     spark.createDataFrame([("shared_repo+fuzzy_name vs declared_package", tp, fp, fn, precision, recall)],
                           "evaluated_on string, true_pos long, false_pos long, false_neg long, "
                           "precision_score double, recall_score double") \
-        .select(F.current_timestamp().alias("run_at"), "*").writeTo("airs.ops.entity_resolution_metrics").append()
+        .select(F.current_timestamp().alias("run_at"), "*").writeTo("tracewell.ops.entity_resolution_metrics").append()
 
     edges = best_edge_per_package(edges).cache()
     log(f"edges kept after one-server-per-package pruning: {edges.count()}")
@@ -353,10 +291,10 @@ def main() -> None:
                        F.current_timestamp().alias("built_at")))
 
     cands.withColumn("built_at", F.current_timestamp()) \
-        .writeTo("airs.silver.asset_candidates").overwrite(F.lit(True))
-    mapping.writeTo("airs.silver.asset_entity_map").overwrite(F.lit(True))
+        .writeTo("tracewell.silver.asset_candidates").overwrite(F.lit(True))
+    mapping.writeTo("tracewell.silver.asset_entity_map").overwrite(F.lit(True))
 
-    m = spark.table("airs.silver.asset_entity_map")
+    m = spark.table("tracewell.silver.asset_entity_map")
     log(f"{m.count()} candidates -> {m.select('asset_id').distinct().count()} assets; "
         f"merged by rule: { {r.match_rule: r['count'] for r in m.groupBy('match_rule').count().collect()} }")
     spark.stop()

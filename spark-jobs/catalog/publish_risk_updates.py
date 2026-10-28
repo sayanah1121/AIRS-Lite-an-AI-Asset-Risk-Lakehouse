@@ -67,7 +67,7 @@ def main() -> None:
     # Watermark = time of the last change already published (a new version's valid_from or a retirement's valid_to).
     watermark = None if args.full else get_state(spark, COMPONENT, "last_valid_from")
     since = F.lit(watermark).cast("timestamp") if watermark else F.lit("1970-01-01").cast("timestamp")
-    dim = spark.table("airs.silver.dim_asset_risk")
+    dim = spark.table("tracewell.silver.dim_asset_risk")
     current = dim.where("is_current")
     changes = current.where(F.col("valid_from") > since).localCheckpoint()
     # Retired assets (no current row any more) become tombstones so consumers drop them from state.
@@ -82,7 +82,7 @@ def main() -> None:
 
     record = F.struct(
         "asset_id", "asset_name", "category",
-        *[F.col(c).cast("double").alias(c) for c in ("airs_score", "capability", "exposure", "governance")],
+        *[F.col(c).cast("double").alias(c) for c in ("risk_score", "capability", "exposure", "governance")],
         "band", "sanctioned", "aliases", "score_reasons", "valid_from")
     header = bytearray(struct.pack(">bI", 0, schema_id))  # Confluent wire format: magic 0 + 4-byte id
     updates = changes.select(F.col("asset_id").cast("binary").alias("key"),

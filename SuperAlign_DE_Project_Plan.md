@@ -61,7 +61,7 @@ The project below copies this architecture end to end, at small scale.
 
 ---
 
-## 3. The project: **"AIRS-Lite: an AI Asset Risk Lakehouse"**
+## 3. The project: **"Tracewell: an AI Asset Lineage & Risk Lakehouse"**
 
 > *A streaming + batch data platform that ingests simulated AI endpoint telemetry, enriches every event with a self-built AI asset risk catalog (built from real public data), rebuilds sessions, redacts PII at ingest, and serves fleet risk, shadow-AI, ROI and incident-investigation analytics, with point-in-time correct history and a tamper-evident audit log.*
 
@@ -72,7 +72,7 @@ The project below copies this architecture end to end, at small scale.
 |---|---|---|
 | **Redpanda** (the Kafka alternative) | Event bus: `ai-events-raw`, `asset-risk-updates` (compacted), `verdicts`, `late-events` | Speaks the Kafka API, so Flink's Kafka connector works unchanged. Single binary with no ZooKeeper or KRaft. Schema Registry and a web console are built in. Light enough for a laptop. |
 | **Apache Flink** | **Real-time path**: redaction, dedupe, enrichment, policy verdicts, sessionization, streaming writes into Iceberg | True event-time processing with watermarks, keyed state, broadcast state and exactly-once checkpoints. This is the "<25 ms verdict" path. |
-| **Apache Spark** | **Batch path**: building the risk catalog, entity resolution, AIRS scoring, SCD2 `MERGE INTO`, gold marts, incident investigation, Iceberg maintenance | Large joins, fuzzy matching and SQL on the lakehouse. Spark has the most complete Iceberg procedure support. |
+| **Apache Spark** | **Batch path**: building the risk catalog, entity resolution, risk scoring, SCD2 `MERGE INTO`, gold marts, incident investigation, Iceberg maintenance | Large joins, fuzzy matching and SQL on the lakehouse. Spark has the most complete Iceberg procedure support. |
 | **Apache Iceberg** (on SeaweedFS S3 storage, with a REST catalog or Nessie) | The single table format both engines write to and read from | ACID tables shared by Flink and Spark, plus `MERGE INTO`, **time travel**, hidden partitioning, schema evolution and compaction. |
 | **Apache Airflow** | Orchestrates every batch job, data-quality check and maintenance task | Production-standard scheduler. Runs jobs through `SparkSubmitOperator`, with sensors and retries. |
 | Trino + Superset *(or Streamlit)* | Querying and dashboards over Iceberg | The "Console-lite" view |
@@ -84,7 +84,7 @@ The project below copies this architecture end to end, at small scale.
 ```
  ┌──────────────── BATCH  (Airflow DAG: catalog_daily → SparkSubmit) ─────────────────┐
  │ Hugging Face Hub API ─┐                                                             │
- │ Official MCP Registry ┼─► Iceberg bronze ─► Spark: entity ─► Spark: AIRS scoring ─► │
+ │ Official MCP Registry ┼─► Iceberg bronze ─► Spark: entity ─► Spark: risk scoring  ─► │
  │ GitHub API (MCP repos)┤   (raw JSON)        resolution       (static + dynamic      │
  │ OSV.dev advisories    ┤                     → dim_asset       exposure from silver) │
  │ PyPI / npm metadata  ─┘                                              │              │
@@ -120,7 +120,7 @@ The project below copies this architecture end to end, at small scale.
 ### Airflow DAGs
 | DAG | Schedule | Tasks |
 |---|---|---|
-| `catalog_daily` | daily | Ingest each source (in parallel) → Spark entity resolution → Spark AIRS scoring + SCD2 `MERGE INTO` → publish changed scores to `asset-risk-updates` → data-quality checks |
+| `catalog_daily` | daily | Ingest each source (in parallel) → Spark entity resolution → Spark risk scoring + SCD2 `MERGE INTO` → publish changed scores to `asset-risk-updates` → data-quality checks |
 | `new_asset_profiling` | hourly | Read unknown assets that Flink flagged → look them up in the sources → score → publish (target: profiled within 24h, like AIRiskDB) |
 | `gold_marts` | hourly | Spark SQL: shadow AI, fleet risk posture, AI ROI, compliance evidence |
 | `iceberg_maintenance` | nightly | Compact the small files Flink writes, expire snapshots, remove orphan files |
@@ -159,7 +159,7 @@ The project below copies this architecture end to end, at small scale.
 - Iceberg features to show off: **hidden partitioning** (`days(ts_event)`, `bucket(16, device_id)`), **schema evolution** (add a column while Flink keeps writing), **time travel** (`FOR TIMESTAMP AS OF`), and **small-file compaction** for streaming writes.
 - `fct_ai_events`, `fct_sessions`, `dim_asset` (SCD2), `dim_identity`, `dim_device`
 - `mart_shadow_ai`: assets seen but unsanctioned, first-seen date, and how many were *never visible on the network sensor* (device-only).
-- `mart_fleet_risk_posture`: AIRS distribution by department, trend over time.
+- `mart_fleet_risk_posture`: risk score distribution by department, trend over time.
 - `mart_ai_roi`: active users per tool per department, idle licences, overlapping tools (ChatGPT + Claude + Copilot in the same team).
 - `mart_compliance_evidence`: per-asset framework mapping export.
 - **Incident investigation (Spark job):** "For incident X, show what was installed on the device, its risk score **as of the event time** (an as-of join on SCD2, *not* today's score), the session timeline, and the blast radius (other devices running the same asset)." For a second proof, use Iceberg time travel to show the catalog exactly as it looked on the incident date.
@@ -181,7 +181,7 @@ The project below copies this architecture end to end, at small scale.
 
 ### Suggested repo layout
 ```
-airs-lite/
+tracewell/
 ├── docker-compose.yml
 ├── simulator/            # fleet telemetry generator (Python → Redpanda)
 ├── flink-jobs/           # redaction, enrichment, sessionization, Iceberg sink

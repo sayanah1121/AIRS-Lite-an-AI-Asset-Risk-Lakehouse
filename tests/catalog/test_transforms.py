@@ -72,7 +72,7 @@ def test_rogue_mcp_server_scores_high(spark):
 
 def test_critical_advisory_floors_to_critical(spark):
     r = scored(spark, capability_text="query a database", vuln_max_severity="CRITICAL")
-    assert float(r.airs_score) == 9.0 and r.band == "Critical"
+    assert float(r.risk_score) == 9.0 and r.band == "Critical"
 
 
 def test_malicious_package_is_critical(spark):

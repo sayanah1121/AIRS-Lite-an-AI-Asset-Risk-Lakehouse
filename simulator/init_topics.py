@@ -1,5 +1,5 @@
 """Create every Redpanda topic the platform uses (idempotent) and register the event schema."""
-from airs_kafka import ensure_topics, register_schema
+from tracewell_kafka import ensure_topics, register_schema
 
 if __name__ == "__main__":
     ensure_topics()

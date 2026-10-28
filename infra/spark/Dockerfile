@@ -33,4 +33,4 @@ ENV SPARK_CONF_DIR=/opt/spark-conf
 ENV PYSPARK_PYTHON=python3
 COPY spark-defaults.conf /opt/spark-conf/spark-defaults.conf
 
-WORKDIR /opt/airs
+WORKDIR /opt/tracewell

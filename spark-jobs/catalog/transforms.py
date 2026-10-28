@@ -1,4 +1,4 @@
-"""Pure Spark column logic for the risk catalog: normalisation, capability signals and AIRS-Lite scoring.
+"""Pure Spark column logic for the risk catalog: normalisation, capability signals and Tracewell risk scoring.
 
 Everything here is a Column expression (no Python UDFs), so it runs inside the JVM and can be
 unit-tested with a local SparkSession (see tests/catalog).
@@ -85,7 +85,7 @@ def _reason(cond: Column, points: float, label: str) -> Column:
 
 
 def score_assets(df: DataFrame, today: Column | None = None) -> DataFrame:
-    """Add capability, exposure, governance, airs_score, band and score_reasons.
+    """Add capability, exposure, governance, risk_score, band and score_reasons.
 
     Expects one row per asset with columns: category, capability_text, capability_tags, pipeline_tag,
     pop_pct (0-1 popularity percentile within category, NULL if unknown), popularity_hint, is_remote,
@@ -162,9 +162,9 @@ def score_assets(df: DataFrame, today: Column | None = None) -> DataFrame:
     out = (df.withColumn("capability", F.round(capability, 1).cast("decimal(3,1)"))
              .withColumn("exposure", F.round(exposure, 1).cast("decimal(3,1)"))
              .withColumn("governance", F.round(governance, 1).cast("decimal(3,1)"))
-             .withColumn("airs_score", F.round(floored, 1).cast("decimal(3,1)"))
+             .withColumn("risk_score", F.round(floored, 1).cast("decimal(3,1)"))
              .withColumn("score_reasons", ranked))
-    return out.withColumn("band", band(F.col("airs_score")))
+    return out.withColumn("band", band(F.col("risk_score")))
 
 
 def band(score: Column) -> Column:

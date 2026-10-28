@@ -2,21 +2,18 @@
 from common import log, spark_session
 
 BRONZE_TABLES = [
-    "hf_models_raw",        # Hugging Face models + datasets
-    "mcp_registry_raw",     # official MCP Registry servers (latest version)
     "pkg_metadata_raw",     # PyPI + npm package metadata
-    "github_repos_raw",     # GitHub repository metadata
     "osv_advisories_raw",   # OSV query results per package version + vulnerability details
 ]
 
 DDL = [
-    "CREATE NAMESPACE IF NOT EXISTS airs.bronze",
-    "CREATE NAMESPACE IF NOT EXISTS airs.silver",
-    "CREATE NAMESPACE IF NOT EXISTS airs.ops",
+    "CREATE NAMESPACE IF NOT EXISTS tracewell.bronze",
+    "CREATE NAMESPACE IF NOT EXISTS tracewell.silver",
+    "CREATE NAMESPACE IF NOT EXISTS tracewell.ops",
     *[f"""
-    CREATE TABLE IF NOT EXISTS airs.bronze.{t} (
+    CREATE TABLE IF NOT EXISTS tracewell.bronze.{t} (
       run_id      STRING    COMMENT 'ingestion run that fetched the record',
-      source      STRING    COMMENT 'source system, e.g. hf_model, npm, osv_vuln',
+      source      STRING    COMMENT 'source system, e.g. pypi, npm, osv_vuln',
       record_key  STRING    COMMENT 'natural key within the source',
       payload     STRING    COMMENT 'raw JSON as returned by the API (trimmed of bulky fields)',
       fetched_at  TIMESTAMP,
@@ -26,7 +23,7 @@ DDL = [
     TBLPROPERTIES ('format-version'='2', 'write.parquet.compression-codec'='zstd')
     """ for t in BRONZE_TABLES],
     """
-    CREATE TABLE IF NOT EXISTS airs.silver.asset_candidates (
+    CREATE TABLE IF NOT EXISTS tracewell.silver.asset_candidates (
       candidate_id     STRING,
       native_id        STRING     COMMENT 'asset id this record would have on its own, e.g. pkg:npm/<name>',
       source           STRING,
@@ -40,14 +37,12 @@ DDL = [
       package_key      STRING     COMMENT 'npm:<name> or pypi:<name>',
       declared_packages ARRAY<STRING> COMMENT 'package keys an MCP server declares',
       version          STRING,
-      popularity       BIGINT     COMMENT 'downloads (HF last 30d, npm last month) or GitHub stars',
-      stars            BIGINT,
+      popularity       BIGINT     COMMENT 'npm downloads last month',
       last_updated     TIMESTAMP,
       archived         BOOLEAN,
       deprecated       BOOLEAN,
       is_remote        BOOLEAN    COMMENT 'MCP server hosted by a third party (remote endpoint)',
-      gated            BOOLEAN,
-      pipeline_tag     STRING,
+      pipeline_tag     STRING     COMMENT 'model task, e.g. text-generation (curated models only)',
       capability_text  STRING     COMMENT 'lowercased text used for capability signals',
       capability_tags  ARRAY<STRING> COMMENT 'curated capability tags (seed assets only)',
       popularity_hint  DOUBLE     COMMENT 'curated exposure prior (seed assets only)',
@@ -59,7 +54,7 @@ DDL = [
     PARTITIONED BY (source)
     """,
     """
-    CREATE TABLE IF NOT EXISTS airs.silver.asset_entity_map (
+    CREATE TABLE IF NOT EXISTS tracewell.silver.asset_entity_map (
       candidate_id STRING,
       asset_id     STRING,
       match_rule   STRING COMMENT 'self | declared_package | shared_repo | fuzzy_name',
@@ -67,7 +62,7 @@ DDL = [
     ) USING iceberg
     """,
     """
-    CREATE TABLE IF NOT EXISTS airs.silver.dim_asset_risk (
+    CREATE TABLE IF NOT EXISTS tracewell.silver.dim_asset_risk (
       asset_sk        BIGINT,
       asset_id        STRING,
       asset_name      STRING,
@@ -82,7 +77,7 @@ DDL = [
       capability      DECIMAL(3,1),
       exposure        DECIMAL(3,1),
       governance      DECIMAL(3,1),
-      airs_score      DECIMAL(3,1),
+      risk_score      DECIMAL(3,1),
       band            STRING,
       score_reasons   ARRAY<STRING>,
       sanctioned      BOOLEAN,
@@ -95,7 +90,7 @@ DDL = [
     TBLPROPERTIES ('format-version'='2', 'write.merge.mode'='merge-on-read')
     """,
     """
-    CREATE TABLE IF NOT EXISTS airs.ops.pipeline_state (
+    CREATE TABLE IF NOT EXISTS tracewell.ops.pipeline_state (
       component  STRING,
       key        STRING,
       value      STRING,
@@ -103,7 +98,7 @@ DDL = [
     ) USING iceberg
     """,
     """
-    CREATE TABLE IF NOT EXISTS airs.ops.entity_resolution_metrics (
+    CREATE TABLE IF NOT EXISTS tracewell.ops.entity_resolution_metrics (
       run_at        TIMESTAMP,
       evaluated_on  STRING,
       true_pos      BIGINT,
@@ -114,7 +109,7 @@ DDL = [
     ) USING iceberg
     """,
     """
-    CREATE TABLE IF NOT EXISTS airs.ops.dq_results (
+    CREATE TABLE IF NOT EXISTS tracewell.ops.dq_results (
       run_at  TIMESTAMP,
       suite   STRING,
       check_name STRING,
@@ -130,8 +125,8 @@ def main() -> None:
     for stmt in DDL:
         spark.sql(stmt)
     for ns in ("bronze", "silver", "ops"):
-        tables = [r.tableName for r in spark.sql(f"SHOW TABLES IN airs.{ns}").collect()]
-        log(f"airs.{ns}: {', '.join(sorted(tables))}")
+        tables = [r.tableName for r in spark.sql(f"SHOW TABLES IN tracewell.{ns}").collect()]
+        log(f"tracewell.{ns}: {', '.join(sorted(tables))}")
     spark.stop()
 
 

@@ -1,5 +1,5 @@
 # Policy rules evaluated by Flink for every event, in priority order; the first match wins, default = allow.
-# Published to the compacted topic `policy-updates` (./airs.sh policies) and held in Flink broadcast state,
+# Published to the compacted topic `policy-updates` (./tracewell.sh policies) and held in Flink broadcast state,
 # so edits apply within seconds without redeploying the job.
 #
 # Conditions (all given conditions must hold):

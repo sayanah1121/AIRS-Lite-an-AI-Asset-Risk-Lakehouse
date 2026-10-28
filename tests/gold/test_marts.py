@@ -6,11 +6,11 @@ from marts import ai_roi, compliance_evidence, fleet_risk_posture, pipeline_heal
 
 EVENT_SCHEMA = ("event_id string, ts_event timestamp, ts_sent timestamp, processed_at timestamp, device_id string, "
                 "identity string, department string, sensor string, asset_id string, asset_known boolean, "
-                "asset_category string, airs_score_at_event double, band_at_event string, sanctioned_at_event boolean, "
+                "asset_category string, risk_score_at_event double, band_at_event string, sanctioned_at_event boolean, "
                 "event_type string, file_name string, bytes_out bigint, sensitive_types array<string>, sensitive_count int, "
                 "policy_id string, action string, latency_ms bigint")
 DIM_SCHEMA = ("asset_id string, asset_name string, category string, publisher string, licence string, band string, "
-              "airs_score double, capability double, exposure double, governance double, sanctioned boolean, "
+              "risk_score double, capability double, exposure double, governance double, sanctioned boolean, "
               "score_reasons array<string>, valid_from timestamp")
 T = datetime(2026, 10, 26, 10, 0)
 
@@ -91,8 +91,8 @@ def test_posture_counts_each_asset_once_at_its_worst_band(spark):
     r = fleet_risk_posture(evs).collect()[0]
     assert (r.events, r.active_people, r.distinct_assets) == (4, 2, 3)
     assert (r.assets_high, r.assets_medium, r.assets_low, r.assets_unknown) == (1, 0, 1, 1)
-    assert r.mean_airs_score == pytest.approx((7.5 + 2.0 + 7.0) / 3, abs=0.01)
-    assert r.max_airs_score == 7.5
+    assert r.mean_risk_score == pytest.approx((7.5 + 2.0 + 7.0) / 3, abs=0.01)
+    assert r.max_risk_score == 7.5
     assert r.high_risk_events == 2 and r.high_risk_event_pct == 50.0
     assert (r.unsanctioned_events, r.sensitive_events, r.blocks) == (3, 1, 1)
 

@@ -28,11 +28,11 @@ def main() -> None:
     spark = spark_session("dq-gold")
     start = datetime.now(timezone.utc).date() - timedelta(days=args.days - 1)
     in_window = F.col("day") >= F.lit(start)
-    events = spark.table("airs.silver.fct_ai_events")
+    events = spark.table("tracewell.silver.fct_ai_events")
     results = []  # (check, passed, detail, fatal)
 
     # Posture must account for every event Flink had committed when the mart was built, and no more.
-    posture = spark.table("airs.gold.fleet_risk_posture").where(in_window).groupBy("day").agg(
+    posture = spark.table("tracewell.gold.fleet_risk_posture").where(in_window).groupBy("day").agg(
         F.sum("events").alias("mart"), F.min("built_at").alias("built_at"))
     silver = events.withColumn("day", F.to_date("ts_event")).where(in_window)
     bounds = posture.join(silver, "day").groupBy("day", "mart").agg(
@@ -47,22 +47,22 @@ def main() -> None:
                         ("policy_hits", ["day", "policy_id", "department", "asset_id"]),
                         ("ai_roi", ["month", "tool_id", "department"]), ("pipeline_health", ["hour"]),
                         ("compliance_evidence", ["asset_id"])]:
-        dup = spark.table(f"airs.gold.{table}").groupBy(*keys).count().where("count > 1").count()
+        dup = spark.table(f"tracewell.gold.{table}").groupBy(*keys).count().where("count > 1").count()
         results.append((f"{table}_unique_{'_'.join(keys)}", dup == 0, f"{dup} duplicate keys", True))
 
-    roi = spark.table("airs.gold.ai_roi")
+    roi = spark.table("tracewell.gold.ai_roi")
     bad_seats = roi.where("idle_seats + active_users - users_without_seat != seats OR idle_seats < 0").count()
     results.append(("ai_roi_seat_arithmetic", bad_seats == 0, f"{bad_seats} rows where seats do not add up", True))
 
-    comp = spark.table("airs.gold.compliance_evidence")
-    n_comp, n_dim = comp.count(), spark.table("airs.silver.dim_asset_risk").where("is_current").count()
+    comp = spark.table("tracewell.gold.compliance_evidence")
+    n_comp, n_dim = comp.count(), spark.table("tracewell.silver.dim_asset_risk").where("is_current").count()
     results.append(("compliance_covers_catalog", n_comp == n_dim, f"{n_comp} evidence rows vs {n_dim} current assets", True))
     no_evidence = comp.where("in_use_30d AND band IN ('High', 'Critical') AND size(evidence) = 0").count()
     results.append(("risky_assets_in_use_have_evidence", no_evidence == 0,
                     f"{no_evidence} High/Critical assets in use without a mapped control", True))
 
     shadow_events = silver.where("NOT asset_known OR NOT sanctioned_at_event").select("day", "asset_id").distinct()
-    shadow_sanctioned = (spark.table("airs.gold.shadow_ai").where(in_window)
+    shadow_sanctioned = (spark.table("tracewell.gold.shadow_ai").where(in_window)
                          .join(shadow_events, ["day", "asset_id"], "left_anti").count())
     results.append(("shadow_ai_only_unsanctioned", shadow_sanctioned == 0,
                     f"{shadow_sanctioned} shadow rows without an unsanctioned or unknown event", True))
@@ -71,7 +71,7 @@ def main() -> None:
     results.append(("silver_no_raw_pii", raw == 0, f"{raw} events with raw sensitive data in the window", True))
 
     # SLOs (warn only), over the hours in the window.
-    h = spark.table("airs.gold.pipeline_health").where(in_window).agg(
+    h = spark.table("tracewell.gold.pipeline_health").where(in_window).agg(
         F.max("latency_p95_ms").alias("p95"), F.sum("events_out").alias("ev"), F.sum("late_events").alias("late"),
         F.sum("unknown_asset_events").alias("unk"), F.sum("dlq_records").alias("dlq"),
         F.sum("records_in").alias("rin")).first()
@@ -89,7 +89,7 @@ def main() -> None:
 
     spark.createDataFrame([(r[0], r[1], r[2]) for r in results], "check_name string, passed boolean, detail string") \
         .select(F.current_timestamp().alias("run_at"), F.lit("gold").alias("suite"), "*") \
-        .writeTo("airs.ops.dq_results").append()
+        .writeTo("tracewell.ops.dq_results").append()
     for check, passed, detail, fatal in results:
         log(f"{'PASS' if passed else ('FAIL' if fatal else 'WARN')}  {check}: {detail}")
     failed = [r for r in results if not r[1] and r[3]]

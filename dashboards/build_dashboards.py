@@ -1,7 +1,7 @@
-"""Create (or update) the AIRS-Lite Superset dashboards through the Superset REST API.
+"""Create (or update) the Tracewell Superset dashboards through the Superset REST API.
 
 Dashboards as code: the Trino connection, the datasets, every chart and the four dashboards are defined
-here, so `./airs.sh dashboards` rebuilds them identically on any machine. Objects are matched by name and
+here, so `./tracewell.sh dashboards` rebuilds them identically on any machine. Objects are matched by name and
 updated in place, so rerunning is safe. Charts query gold tables live through Trino; the hourly
 `gold_marts` DAG is what keeps them current.
 
@@ -17,8 +17,8 @@ import requests
 
 BASE = os.environ.get("SUPERSET_URL", "http://localhost:8088")      # inside the container
 PUBLIC = os.environ.get("SUPERSET_PUBLIC_URL", "http://localhost:8089")  # the host port from docker-compose
-DB_NAME = "AIRS Trino"
-DB_URI = "trino://superset@trino:8080/airs"
+DB_NAME = "Tracewell Trino"
+DB_URI = "trino://superset@trino:8080/tracewell"
 
 
 # ───────────────────────────── datasets ─────────────────────────────
@@ -29,8 +29,16 @@ DATASETS = {
     "fleet_risk_posture": None,
     "ai_roi": None,
     "pipeline_health": None,
+    "investigations": None,
+    "incident_timeline": None,
+    "incident_blast_radius": None,
+    "v_sessions_recent": """
+        SELECT session_id, identity, device_id, department, session_start, session_end, duration_s, event_count,
+               max_band, max_risk_score, blocks, warns, sensitive_events, unknown_assets, mb_out, source,
+               array_join(assets_used, ', ') AS assets_used, array_join(event_types, ', ') AS event_types
+        FROM silver.fct_sessions WHERE session_end >= current_timestamp - INTERVAL '2' DAY""",
     "v_shadow_ai_latest": """
-        SELECT day, asset_id, asset_name, category, current_band, current_airs_score, is_new, first_seen,
+        SELECT day, asset_id, asset_name, category, current_band, current_risk_score, is_new, first_seen,
                devices, identities, events, sensitive_events, blocks, warns, mb_out,
                array_join(departments, ', ') AS departments, array_join(files_touched, ', ') AS files_touched,
                CASE WHEN seen_only_on_device THEN 'Endpoint only' ELSE 'Endpoint + network' END AS visibility
@@ -51,7 +59,7 @@ DATASETS = {
         FROM gold.compliance_evidence c CROSS JOIN UNNEST(c.owasp_llm) AS t(control)
         WHERE c.in_use_30d""",
     "v_compliance_in_use": """
-        SELECT asset_name, category, band, airs_score, sanctioned, devices_30d, sensitive_events_30d,
+        SELECT asset_name, category, band, risk_score, sanctioned, devices_30d, sensitive_events_30d,
                array_join(owasp_llm, ', ') AS owasp_llm, array_join(nist_ai_rmf, ', ') AS nist_ai_rmf,
                array_join(eu_ai_act, ', ') AS eu_ai_act, array_join(evidence, '  •  ') AS evidence
         FROM gold.compliance_evidence WHERE in_use_30d""",
@@ -119,7 +127,7 @@ def table(ds, columns, order_by, limit=50, descending=True, where=None):
 
 EVENTS = m("SUM(events)", "Events")
 SHADOW = {
-    "slug": "shadow-ai", "title": "AIRS-Lite · Shadow AI",
+    "slug": "shadow-ai", "title": "Tracewell · Shadow AI",
     "intro": ("### Shadow AI: AI in use that nobody approved\n"
               "Assets on the **latest day** that are not on the allow-list or not in the catalog at all. "
               "*Endpoint only* = no network sensor saw it, so a proxy or CASB alone would have missed it. "
@@ -133,13 +141,13 @@ SHADOW = {
          ("Visibility of shadow AI", pie("v_shadow_ai_latest", "visibility", m("COUNT(*)", "Assets")), 3, 50),
          ("Shadow AI events by day", bar("shadow_ai", "day", [m("SUM(events)", "Events"), m("SUM(blocks + warns)", "Blocked or warned")], sort_by_metric=False, grain="P1D"), 3, 50)],
         [("AI the catalog has never seen", table("v_shadow_ai_latest", ["asset_name", "devices", "events", "warns", "mb_out", "files_touched", "visibility", "departments", "first_seen"], "first_seen", where="category = 'unknown'"), 12, 45)],
-        [("Most widespread shadow AI", table("v_shadow_ai_latest", ["asset_name", "category", "current_band", "current_airs_score", "devices", "events", "sensitive_events", "blocks", "warns", "mb_out", "visibility", "departments"], "devices", 300, where="category <> 'unknown'"), 12, 70)],
+        [("Most widespread shadow AI", table("v_shadow_ai_latest", ["asset_name", "category", "current_band", "current_risk_score", "devices", "events", "sensitive_events", "blocks", "warns", "mb_out", "visibility", "departments"], "devices", 300, where="category <> 'unknown'"), 12, 70)],
     ],
 }
 POSTURE = {
-    "slug": "risk-posture", "title": "AIRS-Lite · Fleet Risk Posture",
+    "slug": "risk-posture", "title": "Tracewell · Fleet Risk Posture",
     "intro": ("### How risky is the AI each department actually uses?\n"
-              "Per department on the **latest day**: assets by AIRS-Lite band (each asset counted once at its worst "
+              "Per department on the **latest day**: assets by risk band (each asset counted once at its worst "
               "band), every block and warn the stream issued (`gold.policy_hits`), and the framework controls behind "
               "the risk (`gold.compliance_evidence`; a best-effort learning aid, not legal advice)."),
     "rows": [
@@ -151,13 +159,13 @@ POSTURE = {
          ("Policy verdicts by department", bar("v_posture_latest", "department", [m("SUM(blocks)", "Blocks"), m("SUM(warns)", "Warns"), m("SUM(sensitive_events)", "Sensitive events")]), 6, 55)],
         [("Policy hits by rule (latest day)", bar("v_policy_hits_latest", "policy", [m("SUM(hits)", "Hits")], ["action"], horizontal=True, stack=True), 5, 55),
          ("Newest policy hits", table("v_policy_hits_latest", ["first_hit", "policy_id", "action", "department", "asset_name", "hits", "devices", "event_types", "files", "sensitive_types", "mb_out"], "first_hit", 500), 7, 55)],
-        [("Mean AIRS score of assets in use", bar("v_posture_latest", "department", [m("MAX(mean_airs_score)", "Mean AIRS"), m("MAX(max_airs_score)", "Max AIRS")], y_title="AIRS-Lite (0-10)"), 6, 50),
+        [("Mean risk score of assets in use", bar("v_posture_latest", "department", [m("MAX(mean_risk_score)", "Mean risk"), m("MAX(max_risk_score)", "Max risk")], y_title="Risk score (0-10)"), 6, 50),
          ("In-use assets per OWASP LLM risk", bar("v_compliance_controls", "control", [m("COUNT(DISTINCT asset_id)", "Assets in use")], horizontal=True), 6, 50)],
-        [("Compliance evidence for assets in use", table("v_compliance_in_use", ["asset_name", "category", "band", "airs_score", "sanctioned", "devices_30d", "sensitive_events_30d", "owasp_llm", "nist_ai_rmf", "eu_ai_act", "evidence"], "airs_score", 500), 12, 75)],
+        [("Compliance evidence for assets in use", table("v_compliance_in_use", ["asset_name", "category", "band", "risk_score", "sanctioned", "devices_30d", "sensitive_events_30d", "owasp_llm", "nist_ai_rmf", "eu_ai_act", "evidence"], "risk_score", 500), 12, 75)],
     ],
 }
 ROI = {
-    "slug": "ai-roi", "title": "AIRS-Lite · AI ROI",
+    "slug": "ai-roi", "title": "Tracewell · AI ROI",
     "intro": ("### Are we paying for AI seats nobody uses?\n"
               "Licences (simulated purchases in `silver.dim_licence`) against the people in the HR directory who "
               "actually used each tool in the **latest month**. *Overlap* = a department pays for two tools that do the same job."),
@@ -172,7 +180,7 @@ ROI = {
     ],
 }
 HEALTH = {
-    "slug": "pipeline-health", "title": "AIRS-Lite · Pipeline Health",
+    "slug": "pipeline-health", "title": "Tracewell · Pipeline Health",
     "intro": ("### Is the real-time path healthy?\n"
               "Hourly from `gold.pipeline_health` (bronze by write time, silver by verdict time, DLQ by Kafka time). "
               "SLOs: p95 verdict latency < 1 s · late < 5% · unknown assets < 2% · DLQ < 0.1%. "
@@ -188,7 +196,29 @@ HEALTH = {
          ("Data-quality checks (latest run)", table("v_dq_latest", ["result", "check_name", "detail"], "result", descending=False), 6, 50)],
     ],
 }
-DASHBOARDS = [SHADOW, POSTURE, ROI, HEALTH]
+INVESTIGATION = {
+    "slug": "investigation", "title": "Tracewell · Investigation",
+    "intro": ("### What happened in this session, and how risky was each tool *then*?\n"
+              "Pick an investigation (newest first; create one with `./tracewell.sh investigate --session <id>`). Each event shows the "
+              "risk Flink **enforced**, the SCD2 **as-of** version, the Iceberg **time-travel** view of the table at that moment, "
+              "and **today's** profile. Blast radius = everyone else who used the session's risky assets in 30 days."),
+    "filter": {"name": "Investigation", "dataset": "investigations", "column": "investigation_id",
+               "datasets": {"investigations", "incident_timeline", "incident_blast_radius"},
+               "default_sql": "SELECT max(investigation_id) FROM gold.investigations"},
+    "rows": [
+        [("Events in the session", big("investigations", m("MAX(events)", "Events"), "deduplicated, redacted"), 3, 30),
+         ("Assets riskier or safer since", big("investigations", m("MAX(assets_changed_since)", "Changed"), "band or allow-list changed after the event"), 3, 30),
+         ("Time travel agrees with SCD2", big("investigations", m("MAX(tt_agreement_pct) / 100.0", "Agreement"), "rest = commit-lag window (explained)", ".1%"), 3, 30),
+         ("Unexplained mismatches", big("investigations", m("MAX(tt_unexplained)", "Unexplained"), "must be 0"), 3, 30)],
+        [("Risk score then vs now", line("incident_timeline", [m("MAX(score_recorded)", "Enforced by Flink"), m("MAX(score_asof)", "SCD2 as-of"), m("MAX(score_tt)", "Time travel"), m("MAX(score_today)", "Today")], x="ts_event", grain="PT1M", y_title="max Tracewell risk score"), 7, 50),
+         ("Blast radius: devices exposed", bar("incident_blast_radius", "asset_name", [m("MAX(devices)", "Devices"), m("MAX(people)", "People")], horizontal=True), 5, 50)],
+        [("Session timeline", table("incident_timeline", ["seq", "ts_event", "sensor", "event_type", "asset_name", "action", "policy_id", "band_recorded", "band_asof", "band_tt", "band_today", "changed_since_event", "mismatch_reason", "file_name", "dest_host"], "seq", 1000, descending=False), 12, 80)],
+        [("Blast radius", table("incident_blast_radius", ["asset_name", "band_today", "score_today", "devices", "people", "departments", "events", "sensitive_events", "blocks", "first_seen", "last_seen"], "devices"), 12, 40)],
+        [("Sessions worth investigating (last 2 days)", table("v_sessions_recent", ["session_id", "identity", "device_id", "session_start", "duration_s", "event_count", "max_band", "blocks", "warns", "sensitive_events", "unknown_assets", "mb_out", "source", "assets_used"], "blocks", 200), 12, 60)],
+        [("Past investigations", table("investigations", ["investigation_id", "created_at", "session_id", "identity", "device_id", "session_start", "events", "assets_changed_since", "tt_agreement_pct", "tt_unexplained", "max_blast_devices"], "created_at", 100), 12, 40)],
+    ],
+}
+DASHBOARDS = [SHADOW, POSTURE, ROI, HEALTH, INVESTIGATION]
 LABEL_COLORS = {  # the same meaning gets the same colour on every chart
     "Critical": "#B91C1C", "High": "#EA580C", "Medium": "#CA8A04", "Low": "#16A34A", "Unknown": "#7C3AED",
     "block": "#DC2626", "Blocks": "#DC2626", "warn": "#F59E0B", "Warns": "#F59E0B", "Sensitive events": "#7C3AED",
@@ -226,6 +256,41 @@ class Superset:
                 self.call("PUT", f"/api/v1/{kind}/{existing}", update if update is not None else body)
             return existing
         return self.call("POST", f"/api/v1/{kind}/", body)["id"]
+
+
+def query_one(sql: str):
+    """Run a scalar query on Trino directly (the trino driver ships in the Superset image)."""
+    import trino
+    cur = trino.dbapi.connect(host="trino", port=8080, user="superset", catalog="tracewell").cursor()
+    cur.execute(sql)
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def native_filters(dash: dict, datasets: dict[str, int], chart_ds: dict[int, str]) -> list[dict]:
+    """A single-select filter whose default is the newest investigation at build time.
+
+    (Superset's "default to first item" fills the box but does not filter the charts on first load, so the
+    default is set explicitly; `./tracewell.sh investigate` re-runs this for the Investigation dashboard.)
+    Charts on datasets without the filter column are excluded from its scope.
+    """
+    f = dash.get("filter")
+    if not f:
+        return []
+    value = query_one(f["default_sql"])
+    mask = ({"extraFormData": {"filters": [{"col": f["column"], "op": "IN", "val": [value]}]},
+             "filterState": {"value": [value], "label": value}, "ownState": {}}
+            if value else {"extraFormData": {}, "filterState": {}, "ownState": {}})
+    return [{
+        "id": f"NATIVE_FILTER-{f['column']}", "type": "NATIVE_FILTER", "name": f["name"], "filterType": "filter_select",
+        "targets": [{"datasetId": datasets[f["dataset"]], "column": {"name": f["column"]}}],
+        "controlValues": {"enableEmptyFilter": True, "defaultToFirstItem": False, "multiSelect": False,
+                          "searchAllOptions": False, "inverseSelection": False, "sortAscending": False},
+        "defaultDataMask": mask,
+        "cascadeParentIds": [], "description": "",
+        "scope": {"rootPath": ["ROOT_ID"], "excluded": [cid for cid, ds in chart_ds.items() if ds not in f["datasets"]]},
+        "chartsInScope": [cid for cid, ds in chart_ds.items() if ds in f["datasets"]], "tabsInScope": [],
+    }]
 
 
 def layout(dash: dict, chart_ids: dict[str, int]) -> dict:
@@ -267,21 +332,25 @@ def main() -> None:
         api.call("PUT", f"/api/v1/dataset/{datasets[name]}/refresh")  # pick up new or changed columns
     print(f"{len(datasets)} datasets: {', '.join(datasets)}")
 
-    for dash in DASHBOARDS:
+    only = set(sys.argv[1:])
+    for dash in [d for d in DASHBOARDS if not only or d["slug"] in only]:
         dash_id = api.upsert("dashboard", "slug", dash["slug"],
                              {"dashboard_title": dash["title"], "slug": dash["slug"], "published": True})
-        chart_ids = {}
+        chart_ids, chart_ds = {}, {}
         for row in dash["rows"]:
             for name, (ds, params), _, _ in row:
+                chart_ds[name] = ds
                 body = {"slice_name": name, "viz_type": params["viz_type"], "datasource_id": datasets[ds],
                         "datasource_type": "table", "dashboards": [dash_id],
                         "params": json.dumps({**params, "datasource": f"{datasets[ds]}__table"})}
                 chart_ids[name] = api.upsert("chart", "slice_name", name, body)
+        chart_ds = {chart_ids[n]: d for n, d in chart_ds.items()}
         api.call("PUT", f"/api/v1/dashboard/{dash_id}", {
             "dashboard_title": dash["title"], "published": True,
             "position_json": json.dumps(layout(dash, chart_ids)),
             "json_metadata": json.dumps({"refresh_frequency": 600, "color_scheme": "supersetColors",
                                          "label_colors": LABEL_COLORS,
+                                         "native_filter_configuration": native_filters(dash, datasets, chart_ds),
                                          "timed_refresh_immune_slices": [], "expanded_slices": {}})})
         print(f"dashboard {dash['title']}: {len(chart_ids)} charts -> {PUBLIC}/superset/dashboard/{dash['slug']}/")
 

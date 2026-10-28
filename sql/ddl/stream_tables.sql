@@ -1,11 +1,11 @@
 -- Phase 2 streaming tables (Trino DDL: Flink SQL cannot declare hidden partition transforms).
--- Run with: ./airs.sh init
+-- Run with: ./tracewell.sh init
 
-CREATE SCHEMA IF NOT EXISTS airs.bronze;
-CREATE SCHEMA IF NOT EXISTS airs.silver;
+CREATE SCHEMA IF NOT EXISTS tracewell.bronze;
+CREATE SCHEMA IF NOT EXISTS tracewell.silver;
 
 -- Every event as received, after redaction, before dedupe (so duplicates are visible here).
-CREATE TABLE IF NOT EXISTS airs.bronze.ai_events (
+CREATE TABLE IF NOT EXISTS tracewell.bronze.ai_events (
   event_id         varchar,
   ts_event         timestamp(6) with time zone,
   ts_sent          timestamp(6) with time zone,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS airs.bronze.ai_events (
 WITH (format = 'PARQUET', format_version = 2, partitioning = ARRAY['day(ts_event)']);
 
 -- Deduplicated, enriched events with the risk profile that was valid when the event was processed.
-CREATE TABLE IF NOT EXISTS airs.silver.fct_ai_events (
+CREATE TABLE IF NOT EXISTS tracewell.silver.fct_ai_events (
   event_id               varchar,
   ts_event               timestamp(6) with time zone,
   ts_sent                timestamp(6) with time zone,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS airs.silver.fct_ai_events (
   asset_id               varchar,
   asset_known            boolean,
   asset_category         varchar,
-  airs_score_at_event    double,
+  risk_score_at_event    double,
   band_at_event          varchar,
   sanctioned_at_event    boolean,
   catalog_valid_from     timestamp(6) with time zone,   -- which SCD2 version of the risk profile was used
@@ -62,3 +62,29 @@ CREATE TABLE IF NOT EXISTS airs.silver.fct_ai_events (
   processed_at           timestamp(6) with time zone
 )
 WITH (format = 'PARQUET', format_version = 2, partitioning = ARRAY['day(ts_event)', 'bucket(device_id, 16)']);
+
+-- Phase 4: activity sessions per (device, identity). Flink writes on-time sessions (source = 'stream');
+-- the Spark late_event_backfill replaces sessions that late events changed (source = 'backfill').
+CREATE TABLE IF NOT EXISTS tracewell.silver.fct_sessions (
+  session_id        varchar,                          -- sha256(device|identity|start millis)[:16], same in Flink and Spark
+  identity          varchar,
+  device_id         varchar,
+  department        varchar,
+  session_start     timestamp(6) with time zone,      -- first event
+  session_end       timestamp(6) with time zone,      -- last event
+  duration_s        bigint,
+  event_count       bigint,
+  sensors_seen      array(varchar),
+  event_types       array(varchar),
+  assets_used       array(varchar),
+  unknown_assets    integer,
+  max_risk_score    double,
+  max_band          varchar,
+  sensitive_events  bigint,
+  blocks            bigint,
+  warns             bigint,
+  mb_out            double,
+  source            varchar,                          -- stream | backfill
+  built_at          timestamp(6) with time zone
+)
+WITH (format = 'PARQUET', format_version = 2, partitioning = ARRAY['day(session_start)']);

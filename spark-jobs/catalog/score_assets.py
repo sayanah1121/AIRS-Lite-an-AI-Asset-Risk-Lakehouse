@@ -1,4 +1,4 @@
-"""Score every resolved asset with AIRS-Lite and merge the result into silver.dim_asset_risk (SCD Type 2).
+"""Score every resolved asset with Tracewell and merge the result into silver.dim_asset_risk (SCD Type 2).
 
 History rules (hybrid SCD 1 + 2):
   * scored attributes (capability, exposure, governance, score, band, reasons, sanctioned, licence)
@@ -19,8 +19,8 @@ from common import log, spark_session, utcnow
 from transforms import score_assets
 
 SEED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed")
-DIM = "airs.silver.dim_asset_risk"
-SCORED = ["capability", "exposure", "governance", "airs_score", "band", "sanctioned", "licence", "score_reasons"]
+DIM = "tracewell.silver.dim_asset_risk"
+SCORED = ["capability", "exposure", "governance", "risk_score", "band", "sanctioned", "licence", "score_reasons"]
 TYPE1 = ["asset_name", "category", "publisher", "description", "source_systems", "aliases", "version", "popularity"]
 SEV = {"CRITICAL": 4, "HIGH": 3, "MODERATE": 2, "LOW": 1}
 
@@ -31,8 +31,8 @@ def read_seed_column(path: str, column: str) -> list[str]:
 
 
 def build_assets(spark, allow_ids: list[str], trusted: list[str]):
-    c = spark.table("airs.silver.asset_candidates").join(
-        spark.table("airs.silver.asset_entity_map").select("candidate_id", "asset_id"), "candidate_id")
+    c = spark.table("tracewell.silver.asset_candidates").join(
+        spark.table("tracewell.silver.asset_entity_map").select("candidate_id", "asset_id"), "candidate_id")
     canon = (F.col("native_id") == F.col("asset_id")).cast("int")
 
     def pick(col: str):
@@ -85,7 +85,7 @@ def main() -> None:
         F.xxhash64("asset_id", F.lit(run_ts.isoformat())).alias("asset_sk"),
         "asset_id", F.col("name").alias("asset_name"), "category", "publisher", "licence", "description",
         "source_systems", "aliases", "version", "popularity", "capability", "exposure", "governance",
-        "airs_score", "band", "score_reasons", "sanctioned",
+        "risk_score", "band", "score_reasons", "sanctioned",
         F.lit(run_ts).alias("valid_from"), F.lit("9999-12-31 00:00:00").cast("timestamp").alias("valid_to"),
         F.lit(True).alias("is_current"),
         F.sha2(F.concat_ws("|", *[F.coalesce(F.col(c).cast("string"), F.lit("")) for c in SCORED[:-1]],

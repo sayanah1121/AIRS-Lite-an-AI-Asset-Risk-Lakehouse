@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.sdk import DAG, cross_downstream
 
-JOBS = "/opt/airs/spark-jobs"
+JOBS = "/opt/tracewell/spark-jobs"
 MARTS = ["shadow_ai", "fleet_risk_posture", "policy_hits", "ai_roi", "compliance_evidence", "pipeline_health"]
 
 
@@ -29,7 +29,7 @@ def spark_task(task_id: str, script: str, args: list[str], **kwargs) -> SparkSub
         application=f"{JOBS}/gold/{script}",
         application_args=args,
         py_files=f"{JOBS}/catalog/common.py,{JOBS}/gold/marts.py",
-        name=f"airs-gold-{task_id}",
+        name=f"tracewell-gold-{task_id}",
         conf={
             "spark.driver.host": "airflow",
             "spark.driver.bindAddress": "0.0.0.0",

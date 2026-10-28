@@ -41,3 +41,4 @@ npm,@modelcontextprotocol/server-filesystem
 npm,@modelcontextprotocol/server-everything
 npm,@playwright/mcp
 npm,mcp-remote
+npm,mcp-server-kubernetes
